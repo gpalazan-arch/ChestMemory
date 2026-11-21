@@ -34,6 +34,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Optional
 
+from collections import deque
+
 from database.models import (
     AnalysisResult,
     AnalysisStatus,
@@ -55,17 +57,17 @@ class VisualState(str, Enum):
 class VisualDetectorConfig:
     """Tunable thresholds for the temporal chest-opening CV pipeline."""
 
-    prompt_threshold: float = 0.36
+    prompt_threshold: float = 0.34
     ring_start_threshold: float = 0.12
-    ring_complete_threshold: float = 0.72
-    ring_high_confidence_threshold: float = 0.84
+    ring_complete_threshold: float = 0.66
+    ring_high_confidence_threshold: float = 0.80
     ring_clear_threshold: float = 0.15
-    min_search_duration_s: float = 0.22
-    max_search_duration_s: float = 1.85
+    min_search_duration_s: float = 0.18
+    max_search_duration_s: float = 1.90
     confirm_window_s: float = 0.95
-    burst_threshold: float = 0.42
-    xp_threshold: float = 0.40
-    cooldown_s: float = 1.60
+    burst_threshold: float = 0.40
+    xp_threshold: float = 0.38
+    cooldown_s: float = 1.50
     prompt_timeout_s: float = 2.20
     min_monotonic_steps: int = 2
 
@@ -87,6 +89,7 @@ class VisualDiagnostics:
     """Live telemetry snapshot for verifying that OpenCV sees Fortnite clearly."""
 
     running: bool = False
+    monitor_index: int = 1
     fps: float = 0.0
     frame_width: int = 0
     frame_height: int = 0
@@ -97,6 +100,11 @@ class VisualDiagnostics:
     last_ring_fill: float = 0.0
     last_burst_score: float = 0.0
     last_xp_score: float = 0.0
+    peak_prompt_10s: float = 0.0
+    peak_ring_10s: float = 0.0
+    peak_burst_10s: float = 0.0
+    peak_xp_10s: float = 0.0
+    last_event_note: str = ""
     detected_session_chests: int = 0
 
 
@@ -123,6 +131,7 @@ class ChestOpeningFSM:
         self._confirm_had_prompt: bool = False
         self._cooldown_until: float = 0.0
         self._event_seq: int = 0
+        self.last_note: str = "Ожидание обыска сундука..."
 
     @property
     def opened_count(self) -> int:
@@ -201,12 +210,16 @@ class ChestOpeningFSM:
                     # Check if burst/XP is already visible on this exact completion frame
                     return self._check_confirmation(features)
                 # Aborted search before completion!
+                self.last_note = (
+                    f"Сброс обыска: ring_peak={self._search_peak_fill:.2f}, "
+                    f"t={elapsed:.2f}s, steps={self._monotonic_steps}"
+                )
                 self._reset_to_idle()
                 return None
 
-            # Immediate confirmation if ring hit >= 92% AND burst/XP already triggered
+            # Immediate confirmation if ring hit >= 90% AND burst/XP already triggered
             if (
-                fill >= 0.92
+                fill >= 0.90
                 and elapsed >= self.cfg.min_search_duration_s
                 and self._monotonic_steps >= self.cfg.min_monotonic_steps
                 and (
@@ -246,11 +259,16 @@ class ChestOpeningFSM:
                 and self._confirm_peak_fill >= self.cfg.ring_high_confidence_threshold
             ):
                 return self._emit_open_event(t, confidence=0.82)
+            self.last_note = (
+                f"Не подтверждено (нет burst/xp): ring_peak={self._confirm_peak_fill:.2f}, "
+                f"prompt={self._confirm_had_prompt}"
+            )
             self._reset_to_idle()
         return None
 
     def _emit_open_event(self, timestamp_s: float, confidence: float) -> ChestEventRecord:
         self._event_seq += 1
+        self.last_note = f"Засчитан сундук #{self._event_seq} (уверенность {confidence:.0%})"
         event = ChestEventRecord(
             timestamp_ms=int(round(timestamp_s * 1000.0)),
             container_guid=f"visual_chest_{self._event_seq:04d}",
@@ -333,48 +351,48 @@ class VisualChestDetector:
             # Exclusive fullscreen black capture — do not feed garbage into FSM
             return FrameFeatures(timestamp_s=timestamp_s, frame_mean_luma=mean_luma_frame)
 
-        # 1. Interact Prompt Badge Score (wide central-lower zone covering HUD scale 50%..125%)
-        px1, px2 = int(w * 0.36), int(w * 0.66)
-        py1, py2 = int(h * 0.44), int(h * 0.70)
+        # 1. Interact Prompt Badge Score (wide central zone covering HUD scale 50%..125%)
+        px1, px2 = int(w * 0.30), int(w * 0.70)
+        py1, py2 = int(h * 0.32), int(h * 0.72)
         prompt_hsv = hsv[py1:py2, px1:px2]
-        bright_white = (prompt_hsv[:, :, 1] < 65) & (prompt_hsv[:, :, 2] > 205)
-        dark_backing = prompt_hsv[:, :, 2] < 80
+        bright_white = (prompt_hsv[:, :, 1] < 70) & (prompt_hsv[:, :, 2] > 200)
+        dark_backing = prompt_hsv[:, :, 2] < 85
         white_ratio = float(np.mean(bright_white))
         dark_ratio = float(np.mean(dark_backing))
         prompt_score = 0.0
-        if 0.006 <= white_ratio <= 0.32 and dark_ratio >= 0.08:
+        if 0.004 <= white_ratio <= 0.35 and dark_ratio >= 0.06:
             prompt_score = min(
                 1.0,
-                (white_ratio / 0.055) * 0.60 + min(dark_ratio / 0.25, 1.0) * 0.40,
+                (white_ratio / 0.045) * 0.60 + min(dark_ratio / 0.22, 1.0) * 0.40,
             )
 
         # 2. Multi-scale Annulus-Contrast Radial Progress Ring Detection
-        # Candidate centers: crosshair center + any bright compact keycap/ring centroid in zone
+        # Candidate centers: crosshair center + bright compact keycap/ring centroids in zone
         candidate_centers: list[tuple[float, float]] = [(w * 0.50, h * 0.50)]
 
         gray_zone = hsv[py1:py2, px1:px2, 2]
-        bright_mask = ((hsv[py1:py2, px1:px2, 1] < 75) & (gray_zone >= 210)).astype(np.uint8) * 255
+        bright_mask = ((hsv[py1:py2, px1:px2, 1] < 80) & (gray_zone >= 205)).astype(np.uint8) * 255
         contours, _ = cv2.findContours(bright_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         zone_candidates: list[tuple[float, float, float]] = []
-        min_area = max(12.0, (h * 0.008) ** 2)
+        min_area = max(9.0, (h * 0.006) ** 2)
         max_area = (h * 0.10) ** 2
         for cnt in contours:
             area = cv2.contourArea(cnt)
             if min_area <= area <= max_area:
                 bx, by, bw, bh = cv2.boundingRect(cnt)
                 aspect = bw / float(max(1, bh))
-                if 0.55 <= aspect <= 1.85:
+                if 0.50 <= aspect <= 1.95:
                     cx_c = px1 + bx + bw * 0.5
                     cy_c = py1 + by + bh * 0.5
                     dist_center = math.hypot(cx_c - w * 0.5, cy_c - h * 0.52)
                     zone_candidates.append((dist_center, cx_c, cy_c))
         zone_candidates.sort(key=lambda item: item[0])
-        for _d, cx_c, cy_c in zone_candidates[:4]:
+        for _d, cx_c, cy_c in zone_candidates[:5]:
             candidate_centers.append((cx_c, cy_c))
 
         radii = [
-            max(10.0, h * frac)
-            for frac in (0.017, 0.023, 0.030, 0.038, 0.046)
+            max(8.0, h * frac)
+            for frac in (0.011, 0.015, 0.020, 0.026, 0.033, 0.042)
         ]
         ring_fill_ratio = self._measure_best_annulus_ring(hsv, candidate_centers, radii)
 
@@ -473,10 +491,10 @@ class VisualChestDetector:
                 out_val = hsv[oy, ox, 2].astype(np.int32)
                 bg_val = np.minimum(in_val, out_val)
 
-                bright_stroke = (r_val >= 205) & (
-                    (r_sat <= 75) | ((r_hue >= 14) & (r_hue <= 40) & (r_sat >= 90))
+                bright_stroke = (r_val >= 200) & (
+                    (r_sat <= 80) | ((r_hue >= 14) & (r_hue <= 40) & (r_sat >= 85))
                 )
-                has_contrast = (r_val - bg_val) >= 35
+                has_contrast = (r_val - bg_val) >= 30
                 hits = bright_stroke & has_contrast
 
                 fill = float(np.mean(hits))
@@ -568,12 +586,29 @@ class VisualChestDetector:
         )
 
 
+def enumerate_monitors() -> list[tuple[int, str]]:
+    """Return available desktop monitors for Visual CV selection via `mss`."""
+    try:
+        import mss
+
+        with mss.mss() as sct:
+            result: list[tuple[int, str]] = []
+            for idx, mon in enumerate(sct.monitors[1:], start=1):
+                w = mon.get("width", 0)
+                h = mon.get("height", 0)
+                result.append((idx, f"Монитор {idx} ({w}x{h})"))
+            return result or [(1, "Монитор 1 (Основной)")]
+    except Exception:
+        return [(1, "Монитор 1 (Основной)")]
+
+
 class LiveVisualMonitor:
     """Background thread capturing desktop frames via `mss` and running `VisualChestDetector`.
 
     Zero game hooks, zero memory reads — captures standard OS desktop frames only.
-    Automatically detects black capture frames (caused by Exclusive Fullscreen) and
-    exposes real-time `VisualDiagnostics`.
+    Automatically recovers from transient Windows capture errors (Alt-Tab / UAC /
+    display mode switches), detects black frames (Exclusive Fullscreen), and exposes
+    real-time + 10-second peak `VisualDiagnostics`.
     """
 
     def __init__(
@@ -588,13 +623,13 @@ class LiveVisualMonitor:
         self._on_chest_opened = on_chest_opened
         self._on_error = on_error
         self._on_diagnostics = on_diagnostics
-        self._fps = max(4.0, min(30.0, float(fps)))
+        self._fps = max(8.0, min(30.0, float(fps)))
         self._monitor_index = max(1, int(monitor_index))
         self._detector = VisualChestDetector(config=config)
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._diag_lock = threading.Lock()
-        self._diagnostics = VisualDiagnostics()
+        self._diagnostics = VisualDiagnostics(monitor_index=self._monitor_index)
 
     @property
     def is_running(self) -> bool:
@@ -606,6 +641,7 @@ class LiveVisualMonitor:
             d = self._diagnostics
             return VisualDiagnostics(
                 running=self.is_running,
+                monitor_index=d.monitor_index,
                 fps=d.fps,
                 frame_width=d.frame_width,
                 frame_height=d.frame_height,
@@ -616,6 +652,11 @@ class LiveVisualMonitor:
                 last_ring_fill=d.last_ring_fill,
                 last_burst_score=d.last_burst_score,
                 last_xp_score=d.last_xp_score,
+                peak_prompt_10s=d.peak_prompt_10s,
+                peak_ring_10s=d.peak_ring_10s,
+                peak_burst_10s=d.peak_burst_10s,
+                peak_xp_10s=d.peak_xp_10s,
+                last_event_note=d.last_event_note,
                 detected_session_chests=d.detected_session_chests,
             )
 
@@ -663,63 +704,96 @@ class LiveVisualMonitor:
         measured_fps = 0.0
         black_streak = 0
         last_diag_emit = 0.0
+        # Rolling 10-second feature history for human-readable peak telemetry
+        peak_window: deque[tuple[float, float, float, float, float]] = deque()
 
-        try:
-            with mss.mss() as sct:
-                mon_idx = min(self._monitor_index, len(sct.monitors) - 1)
-                monitor = sct.monitors[mon_idx]
-                while not self._stop_event.is_set():
-                    tick_start = time.monotonic()
-                    raw_img = np.asarray(sct.grab(monitor))
-                    frame_bgr = cv2.cvtColor(raw_img, cv2.COLOR_BGRA2BGR)
-                    features = self._detector.extract_features_bgr(frame_bgr, tick_start - t0)
+        while not self._stop_event.is_set():
+            try:
+                with mss.mss() as sct:
+                    mon_idx = min(self._monitor_index, len(sct.monitors) - 1)
+                    monitor = sct.monitors[mon_idx]
+                    while not self._stop_event.is_set():
+                        tick_start = time.monotonic()
+                        raw_img = np.asarray(sct.grab(monitor))
+                        frame_bgr = cv2.cvtColor(raw_img, cv2.COLOR_BGRA2BGR)
+                        features = self._detector.extract_features_bgr(frame_bgr, tick_start - t0)
 
-                    if features.frame_mean_luma < 2.0:
-                        black_streak += 1
-                        event = None
-                    else:
-                        black_streak = 0
-                        event = self._detector.fsm.update(features)
+                        if features.frame_mean_luma < 2.0:
+                            black_streak += 1
+                            event = None
+                        else:
+                            black_streak = 0
+                            event = self._detector.fsm.update(features)
 
-                    frames_in_window += 1
-                    dt_fps = tick_start - fps_window_start
-                    if dt_fps >= 1.0:
-                        measured_fps = frames_in_window / dt_fps
-                        frames_in_window = 0
-                        fps_window_start = tick_start
+                        frames_in_window += 1
+                        dt_fps = tick_start - fps_window_start
+                        if dt_fps >= 1.0:
+                            measured_fps = frames_in_window / dt_fps
+                            frames_in_window = 0
+                            fps_window_start = tick_start
 
-                    black_warn = black_streak >= int(self._fps * 1.5)
-                    h, w = frame_bgr.shape[:2]
-                    snap = VisualDiagnostics(
-                        running=True,
-                        fps=round(measured_fps, 1),
-                        frame_width=w,
-                        frame_height=h,
-                        frame_mean_luma=round(features.frame_mean_luma, 1),
-                        black_frame_warning=black_warn,
-                        fsm_state=self._detector.fsm.state.value,
-                        last_prompt_score=round(features.prompt_score, 3),
-                        last_ring_fill=round(features.ring_fill_ratio, 3),
-                        last_burst_score=round(features.loot_burst_score, 3),
-                        last_xp_score=round(features.xp_banner_score, 3),
-                        detected_session_chests=self._detector.fsm.opened_count,
-                    )
-                    with self._diag_lock:
-                        self._diagnostics = snap
+                        peak_window.append(
+                            (
+                                tick_start,
+                                features.prompt_score,
+                                features.ring_fill_ratio,
+                                features.loot_burst_score,
+                                features.xp_banner_score,
+                            )
+                        )
+                        cutoff = tick_start - 10.0
+                        while peak_window and peak_window[0][0] < cutoff:
+                            peak_window.popleft()
 
-                    if self._on_diagnostics and (tick_start - last_diag_emit) >= 1.0:
-                        last_diag_emit = tick_start
-                        try:
-                            self._on_diagnostics(snap)
-                        except Exception:
-                            pass
+                        pk_p = max((x[1] for x in peak_window), default=0.0)
+                        pk_r = max((x[2] for x in peak_window), default=0.0)
+                        pk_b = max((x[3] for x in peak_window), default=0.0)
+                        pk_x = max((x[4] for x in peak_window), default=0.0)
 
-                    if event is not None:
-                        self._on_chest_opened(event)
+                        black_warn = black_streak >= int(self._fps * 1.5)
+                        h, w = frame_bgr.shape[:2]
+                        snap = VisualDiagnostics(
+                            running=True,
+                            monitor_index=mon_idx,
+                            fps=round(measured_fps, 1),
+                            frame_width=w,
+                            frame_height=h,
+                            frame_mean_luma=round(features.frame_mean_luma, 1),
+                            black_frame_warning=black_warn,
+                            fsm_state=self._detector.fsm.state.value,
+                            last_prompt_score=round(features.prompt_score, 3),
+                            last_ring_fill=round(features.ring_fill_ratio, 3),
+                            last_burst_score=round(features.loot_burst_score, 3),
+                            last_xp_score=round(features.xp_banner_score, 3),
+                            peak_prompt_10s=round(pk_p, 2),
+                            peak_ring_10s=round(pk_r, 2),
+                            peak_burst_10s=round(pk_b, 2),
+                            peak_xp_10s=round(pk_x, 2),
+                            last_event_note=self._detector.fsm.last_note,
+                            detected_session_chests=self._detector.fsm.opened_count,
+                        )
+                        with self._diag_lock:
+                            self._diagnostics = snap
 
-                    sleep_for = interval - (time.monotonic() - tick_start)
-                    if sleep_for > 0:
-                        self._stop_event.wait(sleep_for)
-        except Exception as exc:  # pragma: no cover - OS capture errors on Windows
-            if self._on_error:
-                self._on_error(f"Ошибка визуального мониторинга: {exc}")
+                        if self._on_diagnostics and (tick_start - last_diag_emit) >= 1.0:
+                            last_diag_emit = tick_start
+                            try:
+                                self._on_diagnostics(snap)
+                            except Exception:
+                                pass
+
+                        if event is not None:
+                            try:
+                                self._on_chest_opened(event)
+                            except Exception as cb_exc:
+                                if self._on_error:
+                                    self._on_error(f"Ошибка сохранения сундука CV: {cb_exc}")
+
+                        sleep_for = interval - (time.monotonic() - tick_start)
+                        if sleep_for > 0:
+                            self._stop_event.wait(sleep_for)
+            except Exception as exc:  # pragma: no cover - transient OS capture recovery
+                with self._diag_lock:
+                    self._diagnostics.last_event_note = f"Восстановление захвата экрана: {exc}"
+                # Brief backoff and auto-recover `mss` handle (survives Alt-Tab / UAC / mode change)
+                self._stop_event.wait(0.75)

@@ -197,6 +197,66 @@ class TestWatcherAndController(unittest.TestCase):
         self.assertEqual(emitted_statuses[-1].level, "warning")
         self.assertIn("BLACK SCREEN", emitted_statuses[-1].label)
 
+    def test_hybrid_mode_persists_live_and_reconciles_replays_without_double_counting(self) -> None:
+        ctrl = ChestMemoryController(data_dir=self.data_dir)
+        cfg = replace(
+            ctrl.config,
+            replay_dir=str(self.demos_dir),
+            detection_mode="hybrid",
+            auto_backup_enabled=False,
+        )
+        ctrl.update_config(cfg, restart_monitoring=False)
+
+        emitted_stats = []
+        ctrl.on_stats_updated(emitted_stats.append)
+
+        # 1. Live Visual CV detects 2 chests in Hybrid mode -> MUST persist & emit IMMEDIATELY!
+        ctrl._handle_live_visual_chest(
+            ChestEventRecord(timestamp_ms=10_000, container_guid="h1", container_class="Visual_Chest_Opened")
+        )
+        ctrl._handle_live_visual_chest(
+            ChestEventRecord(timestamp_ms=20_000, container_guid="h2", container_class="Visual_Chest_Opened")
+        )
+        self.assertEqual(emitted_stats[-1].total_chests, 2)
+        self.assertEqual(ctrl.get_stats().total_matches, 1)
+
+        # 2. Match ends with an Oodle-compressed .replay (no DLL) -> links to live session, NO error!
+        oodle_replay = self.demos_dir / "hybrid_oodle_match.replay"
+        oodle_replay.write_bytes(build_replay_bytes(is_compressed=True, compress_with_zlib=False))
+        res1 = ctrl.process_replay_file(oodle_replay)
+        self.assertIsNotNone(res1)
+        self.assertTrue(res1.is_reliable)
+        self.assertEqual(res1.chests_opened, 2)
+        self.assertEqual(ctrl.get_stats().total_chests, 2)
+        self.assertEqual(ctrl.get_stats().total_matches, 1)
+        self.assertEqual(ctrl.get_stats().failed_replays_count, 0)
+
+        # 3. Next match: live CV detects 1 chest, then authoritative .replay decodes 3 chests ->
+        #    replaces live session cleanly (total = 2 + 3 = 5, NOT 2 + 1 + 3 = 6!)
+        ctrl._handle_live_visual_chest(
+            ChestEventRecord(timestamp_ms=5_000, container_guid="h3", container_class="Visual_Chest_Opened")
+        )
+        self.assertEqual(ctrl.get_stats().total_chests, 3)
+
+        auth_replay = self.demos_dir / "hybrid_auth_match.replay"
+        auth_replay.write_bytes(
+            build_replay_bytes(
+                match_guid="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                timestamp=datetime.now(timezone.utc),
+                local_pawns=["p1"],
+                updates=[
+                    ContainerUpdate(1000, "c1", "Tiered_Chest_Athena_C", b_already_searched=True, searching_pawn_guid="p1"),
+                    ContainerUpdate(2000, "c2", "Tiered_Chest_Athena_C", b_already_searched=True, searching_pawn_guid="p1"),
+                    ContainerUpdate(3000, "c3", "Tiered_Chest_Athena_C", b_already_searched=True, searching_pawn_guid="p1"),
+                ],
+            )
+        )
+        res2 = ctrl.process_replay_file(auth_replay)
+        self.assertIsNotNone(res2)
+        self.assertTrue(res2.is_reliable)
+        self.assertEqual(ctrl.get_stats().total_chests, 5)
+        self.assertEqual(ctrl.get_stats().total_matches, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

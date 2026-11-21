@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import ctypes
 import hashlib
+import json
 import os
 import struct
+import sys
 import uuid
 import zlib
 from dataclasses import dataclass, field
@@ -380,7 +382,11 @@ class OodleDecompressor:
     DEFAULT_SEARCH_DIRS = (
         Path(r"C:\Program Files\Epic Games\Fortnite\FortniteGame\Binaries\Win64"),
         Path(r"D:\Program Files\Epic Games\Fortnite\FortniteGame\Binaries\Win64"),
+        Path(r"D:\Epic Games\Fortnite\FortniteGame\Binaries\Win64"),
         Path(r"E:\Epic Games\Fortnite\FortniteGame\Binaries\Win64"),
+        Path(r"F:\Epic Games\Fortnite\FortniteGame\Binaries\Win64"),
+        Path(r"D:\Games\Fortnite\FortniteGame\Binaries\Win64"),
+        Path(r"E:\Games\Fortnite\FortniteGame\Binaries\Win64"),
     )
 
     def __init__(self, explicit_dll_path: str | Path | None = None) -> None:
@@ -395,27 +401,81 @@ class OodleDecompressor:
     def is_available(self) -> bool:
         return self._dll_path is not None and self._dll_path.exists()
 
+    @staticmethod
+    def _find_in_dir(directory: Path) -> Optional[Path]:
+        if not directory.is_dir():
+            return None
+        try:
+            matches = sorted(directory.glob("oo2core_*_win64.dll"), reverse=True)
+            if matches:
+                return matches[0]
+        except OSError:
+            return None
+        return None
+
+    @staticmethod
+    def _discover_epic_install_dirs() -> list[Path]:
+        """Read Epic Games Launcher install records to locate Fortnite/UE game folders on any drive."""
+        found: list[Path] = []
+        program_data = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData"))
+        installed_dat = program_data / "Epic" / "UnrealEngineLauncher" / "LauncherInstalled.dat"
+        if installed_dat.is_file():
+            try:
+                data = json.loads(installed_dat.read_text(encoding="utf-8", errors="ignore"))
+                for item in data.get("InstallationList", []):
+                    loc = item.get("InstallLocation")
+                    if isinstance(loc, str) and loc:
+                        base = Path(loc)
+                        found.extend(
+                            [
+                                base / "FortniteGame" / "Binaries" / "Win64",
+                                base / "Engine" / "Binaries" / "Win64",
+                                base / "Binaries" / "Win64",
+                                base,
+                            ]
+                        )
+            except (OSError, json.JSONDecodeError, TypeError):
+                pass
+        return found
+
     def _locate_dll(self, explicit_dll_path: str | Path | None) -> Optional[Path]:
         if explicit_dll_path:
             p = Path(explicit_dll_path)
             if p.is_file():
                 return p
-            if p.is_dir():
-                matches = sorted(p.glob("oo2core_*_win64.dll"), reverse=True)
-                if matches:
-                    return matches[0]
+            hit = self._find_in_dir(p)
+            if hit:
+                return hit
 
-        local_bin = Path(__file__).resolve().parent.parent / "data" / "bin"
-        if local_bin.is_dir():
-            matches = sorted(local_bin.glob("oo2core_*_win64.dll"), reverse=True)
-            if matches:
-                return matches[0]
+        candidate_dirs: list[Path] = []
 
-        for candidate_dir in self.DEFAULT_SEARCH_DIRS:
-            if candidate_dir.is_dir():
-                matches = sorted(candidate_dir.glob("oo2core_*_win64.dll"), reverse=True)
-                if matches:
-                    return matches[0]
+        # 1. Next to ChestMemory.exe (critical for PyInstaller --onefile builds!)
+        if getattr(sys, "frozen", False):
+            exe_dir = Path(sys.executable).resolve().parent
+            candidate_dirs.extend([exe_dir, exe_dir / "data" / "bin", exe_dir / "bin"])
+
+        # 2. AppData / LocalAppData ChestMemory bin folders
+        for env_key in ("APPDATA", "LOCALAPPDATA"):
+            base_env = os.environ.get(env_key)
+            if base_env:
+                candidate_dirs.append(Path(base_env) / "ChestMemory" / "bin")
+                candidate_dirs.append(Path(base_env) / "ChestMemory")
+
+        # 3. Source tree ./data/bin
+        candidate_dirs.append(Path(__file__).resolve().parent.parent / "data" / "bin")
+
+        # 4. Epic Games Launcher installed apps + standard Fortnite directories
+        candidate_dirs.extend(self._discover_epic_install_dirs())
+        candidate_dirs.extend(self.DEFAULT_SEARCH_DIRS)
+
+        seen: set[Path] = set()
+        for candidate_dir in candidate_dirs:
+            if candidate_dir in seen:
+                continue
+            seen.add(candidate_dir)
+            hit = self._find_in_dir(candidate_dir)
+            if hit:
+                return hit
         return None
 
     def _ensure_loaded(self) -> None:
@@ -423,8 +483,9 @@ class OodleDecompressor:
             return
         if not self.is_available or self._dll_path is None:
             raise DecompressionUnavailableError(
-                "Oodle compression detected, but oo2core_*_win64.dll was not found. "
-                "Specify the path to oo2core_*_win64.dll in Settings or switch to Hybrid/Visual mode."
+                "Реплей сжат Oodle, но файл oo2core_*_win64.dll не найден "
+                "(современный UE5 Fortnite встраивает Oodle в .exe и не кладёт DLL отдельно). "
+                "Используйте живой режим Visual CV / Гибридный или укажите путь к oo2core_*_win64.dll в настройках."
             )
         try:
             lib = ctypes.CDLL(str(self._dll_path))

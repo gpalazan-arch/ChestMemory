@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 from core.controller import ChestMemoryController
 from core.statistics import format_chest_number
 from detector.replay_parser import detect_default_fortnite_replay_dir
+from detector.visual_detector import enumerate_monitors
 
 
 DIALOG_STYLESHEET = """
@@ -196,12 +197,28 @@ class SettingsDialog(QDialog):
 
         # Detection mode
         self.combo_mode = QComboBox()
-        self.combo_mode.addItem("Гибридный (Реплеи + Visual CV резерв)", "hybrid")
+        self.combo_mode.addItem("Гибридный (Живой Visual CV + Реплеи)", "hybrid")
+        self.combo_mode.addItem("Только компьютерное зрение (OpenCV — живой счёт)", "visual")
         self.combo_mode.addItem("Только анализ .replay файлов", "replay")
-        self.combo_mode.addItem("Только компьютерное зрение (OpenCV)", "visual")
         idx = self.combo_mode.findData(cfg.detection_mode)
         self.combo_mode.setCurrentIndex(max(0, idx))
         form.addRow("Режим детектора:", self.combo_mode)
+
+        # Monitor & FPS selection for Visual CV (critical on multi-monitor setups)
+        cv_row = QHBoxLayout()
+        self.combo_monitor = QComboBox()
+        for mon_idx, mon_label in enumerate_monitors():
+            self.combo_monitor.addItem(mon_label, mon_idx)
+        mon_pos = self.combo_monitor.findData(cfg.visual_monitor_index)
+        self.combo_monitor.setCurrentIndex(max(0, mon_pos))
+        cv_row.addWidget(self.combo_monitor, 1)
+
+        self.spin_visual_fps = QSpinBox()
+        self.spin_visual_fps.setRange(10, 30)
+        self.spin_visual_fps.setSuffix(" FPS")
+        self.spin_visual_fps.setValue(max(10, min(30, int(round(cfg.visual_fps)))))
+        cv_row.addWidget(self.spin_visual_fps)
+        form.addRow("Экран и FPS (CV):", cv_row)
 
         # Oodle DLL path
         oodle_row = QHBoxLayout()
@@ -387,16 +404,17 @@ class SettingsDialog(QDialog):
             )
         elif diag.black_frame_warning:
             self.lbl_cv_diag.setText(
-                f"ВНИМАНИЕ: Чёрный кадр (luma={diag.frame_mean_luma}, {diag.frame_width}x{diag.frame_height}, "
-                f"{diag.fps} FPS). Переключите Fortnite в «В окне без рамки» (Windowed Fullscreen)!"
+                f"ВНИМАНИЕ: Чёрный кадр на Мониторе {diag.monitor_index} "
+                f"(luma={diag.frame_mean_luma}, {diag.frame_width}x{diag.frame_height}, {diag.fps} FPS).\n"
+                "Переключите Fortnite в «В окне без рамки» (Windowed Fullscreen) или выберите нужный монитор."
             )
         else:
+            note = f" | {diag.last_event_note}" if diag.last_event_note else ""
             self.lbl_cv_diag.setText(
-                f"Активен | {diag.frame_width}x{diag.frame_height} @ {diag.fps} FPS | "
-                f"luma={diag.frame_mean_luma} | FSM={diag.fsm_state} | "
-                f"prompt={diag.last_prompt_score:.2f} ring={diag.last_ring_fill:.2f} "
-                f"burst={diag.last_burst_score:.2f} xp={diag.last_xp_score:.2f} | "
-                f"сессия={diag.detected_session_chests}"
+                f"Активен | Мон.{diag.monitor_index} {diag.frame_width}x{diag.frame_height} @ {diag.fps} FPS | "
+                f"luma={diag.frame_mean_luma} | FSM={diag.fsm_state} | сессия={diag.detected_session_chests}\n"
+                f"Пик за 10с: prompt={diag.peak_prompt_10s:.2f} ring={diag.peak_ring_10s:.2f} "
+                f"burst={diag.peak_burst_10s:.2f} xp={diag.peak_xp_10s:.2f}{note}"
             )
 
     def _refresh_diagnostics(self) -> None:
@@ -443,6 +461,8 @@ class SettingsDialog(QDialog):
             self.controller.config,
             replay_dir=self.edit_replay_dir.text().strip(),
             detection_mode=str(self.combo_mode.currentData()),
+            visual_monitor_index=int(self.combo_monitor.currentData() or 1),
+            visual_fps=float(self.spin_visual_fps.value()),
             oodle_dll_path=self.edit_oodle.text().strip(),
             external_parser_cmd=self.edit_ext_cmd.text().strip(),
             window_opacity=self.slider_opacity.value() / 100.0,

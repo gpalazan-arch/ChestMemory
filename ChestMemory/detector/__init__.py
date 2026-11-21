@@ -22,6 +22,7 @@ from .visual_detector import (
     VisualDetectorConfig,
     VisualDiagnostics,
     VisualState,
+    enumerate_monitors,
 )
 
 __all__ = [
@@ -44,5 +45,6 @@ __all__ = [
     "VisualDiagnostics",
     "VisualState",
     "compute_file_sha256",
+    "enumerate_monitors",
     "is_replay_live",
 ]

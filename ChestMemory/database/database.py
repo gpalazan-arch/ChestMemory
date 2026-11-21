@@ -377,6 +377,98 @@ class DatabaseManager:
                     conn.execute("ROLLBACK;")
                 raise DatabaseError(f"Failed to record live visual chest: {exc}") from exc
 
+    def delete_live_session(self, session_id: str) -> bool:
+        """Delete a temporary live Visual CV match row (used when authoritative replay reconciles it)."""
+        replay_id = f"visual_live:{session_id}"
+        with self._connect() as conn:
+            conn.execute("BEGIN;")
+            try:
+                cur = conn.execute("DELETE FROM matches WHERE replay_id = ?;", (replay_id,))
+                conn.execute("COMMIT;")
+                return cur.rowcount > 0
+            except sqlite3.Error as exc:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK;")
+                raise DatabaseError(f"Failed to delete live visual session: {exc}") from exc
+
+    def attach_replay_metadata_to_live_session(
+        self,
+        session_id: str,
+        replay_id: str,
+        file_hash: str,
+        file_name: str,
+        friendly_name: str = "",
+        match_duration_ms: int = 0,
+        eliminations: Optional[int] = None,
+        placement: Optional[int] = None,
+    ) -> Optional[MatchRecord]:
+        """Link a finished `.replay` file's identity/metadata to an active live Visual CV session.
+
+        Prevents duplicate counting or false failure logs when Visual CV already counted chests
+        live during a match whose `.replay` cannot be binary-decompressed.
+        """
+        live_replay_id = f"visual_live:{session_id}"
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute("BEGIN;")
+            try:
+                existing = conn.execute(
+                    "SELECT * FROM matches WHERE replay_id = ? LIMIT 1;",
+                    (live_replay_id,),
+                ).fetchone()
+                if existing is None:
+                    conn.execute("ROLLBACK;")
+                    return None
+
+                # Ensure target replay_id / file_hash is not already recorded on another match
+                conflict = conn.execute(
+                    "SELECT id FROM matches WHERE (replay_id = ? OR file_hash = ?) AND id != ? LIMIT 1;",
+                    (replay_id, file_hash, int(existing["id"])),
+                ).fetchone()
+                if conflict is not None:
+                    conn.execute("ROLLBACK;")
+                    return None
+
+                match_id = int(existing["id"])
+                conn.execute(
+                    """
+                    UPDATE matches
+                    SET replay_id = ?,
+                        file_hash = ?,
+                        file_name = ?,
+                        friendly_name = CASE WHEN ? != '' THEN ? ELSE friendly_name END,
+                        match_duration_ms = MAX(match_duration_ms, ?),
+                        eliminations = COALESCE(?, eliminations),
+                        placement = COALESCE(?, placement),
+                        processed_at = ?,
+                        engine_version = 'Hybrid-VisualCV+ReplayMeta'
+                    WHERE id = ?;
+                    """,
+                    (
+                        replay_id,
+                        file_hash,
+                        file_name,
+                        friendly_name,
+                        friendly_name,
+                        int(match_duration_ms),
+                        eliminations,
+                        placement,
+                        _dt_to_iso(now),
+                        match_id,
+                    ),
+                )
+                conn.execute(
+                    "DELETE FROM failed_analyses WHERE file_hash = ? OR replay_id = ?;",
+                    (file_hash, replay_id),
+                )
+                row = conn.execute("SELECT * FROM matches WHERE id = ?;", (match_id,)).fetchone()
+                conn.execute("COMMIT;")
+                return self._row_to_match(row) if row else None
+            except sqlite3.Error as exc:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK;")
+                raise DatabaseError(f"Failed to attach replay metadata to live session: {exc}") from exc
+
     def record_failed_analysis(self, result: AnalysisResult) -> FailedAnalysisRecord:
         """Record a failed analysis attempt separately from valid matches."""
         attempted_at = _utc_now()

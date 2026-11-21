@@ -168,11 +168,12 @@ class ChestMemoryController:
                     started_any = True
 
             if started_any:
-                label = (
-                    "MONITORING ACTIVE"
-                    if mode != "visual"
-                    else "VISUAL CV ACTIVE"
-                )
+                if mode == "visual":
+                    label = "VISUAL CV ACTIVE"
+                elif self._live_visual is not None and self._live_visual.is_running:
+                    label = "MONITORING ACTIVE (CV)"
+                else:
+                    label = "MONITORING ACTIVE"
                 self._emit_status(
                     StatusEvent(
                         level="active",
@@ -263,36 +264,18 @@ class ChestMemoryController:
             self._restore_monitoring_status()
             return result
 
-        # If replay binary stream could not be decoded in hybrid mode, check whether
-        # LiveVisualMonitor captured verified chest openings during this match!
-        if not result.is_reliable and self.config.detection_mode == "hybrid":
-            with self._lock:
-                visual_events = list(self._live_visual_events)
-                if visual_events:
-                    self._live_visual_events.clear()
-                    self.counter.reset_live_match()
-                    result = AnalysisResult(
-                        status=AnalysisStatus.SUCCESS,
-                        replay_id=result.replay_id,
-                        file_path=str(path),
-                        file_hash=file_hash,
-                        chests_opened=len(visual_events),
-                        source=DetectionSource.VISUAL_CV,
-                        attribution_mode=AttributionMode.VISUAL_LOCAL_HUD,
-                        match_timestamp=result.match_timestamp or datetime.now(timezone.utc),
-                        match_duration_ms=result.match_duration_ms,
-                        friendly_name=result.friendly_name or path.stem,
-                        engine_version=f"{result.engine_version} + VisualCV",
-                        eliminations=result.eliminations,
-                        placement=result.placement,
-                        events=visual_events,
-                    )
-
         if result.is_reliable:
-            # Clear live visual buffer when authoritative replay succeeded
+            # Reconcile any active live CV session so the authoritative replay never double-counts
+            live_sid_to_replace: Optional[str] = None
             with self._lock:
+                if self._live_visual_session_id and self._live_visual_events:
+                    live_sid_to_replace = self._live_visual_session_id
                 self._live_visual_events.clear()
+                self._live_visual_session_id = None
                 self.counter.reset_live_match()
+
+            if live_sid_to_replace is not None:
+                self.db.delete_live_session(live_sid_to_replace)
 
             inserted, match = self.db.save_analysis_result(result)
             if inserted and match is not None:
@@ -300,17 +283,86 @@ class ChestMemoryController:
             self._restore_monitoring_status()
             return result
 
+        # In hybrid mode, if binary `.replay` cannot be decompressed/decoded, link it to the
+        # active live Visual CV match session (already persisted live!) so we avoid duplicate errors.
+        if (
+            not force_retry_failed
+            and self.config.detection_mode == "hybrid"
+            and result.status != AnalysisStatus.LIVE_REPLAY
+        ):
+            now_mono = time.monotonic()
+            session_id_to_link: Optional[str] = None
+            linked_events: list[ChestEventRecord] = []
+            with self._lock:
+                if (
+                    self._live_visual_session_id is not None
+                    and self._live_visual_events
+                    and (now_mono - self._live_visual_last_event_mono) <= 1200.0
+                ):
+                    session_id_to_link = self._live_visual_session_id
+                    linked_events = list(self._live_visual_events)
+
+            if session_id_to_link is not None:
+                attached = self.db.attach_replay_metadata_to_live_session(
+                    session_id=session_id_to_link,
+                    replay_id=result.replay_id,
+                    file_hash=file_hash,
+                    file_name=path.name,
+                    friendly_name=result.friendly_name or path.stem,
+                    match_duration_ms=result.match_duration_ms,
+                    eliminations=result.eliminations,
+                    placement=result.placement,
+                )
+                if attached is not None:
+                    with self._lock:
+                        self._live_visual_events.clear()
+                        self._live_visual_session_id = None
+                        self.counter.reset_live_match()
+                    self._after_match_saved(attached)
+                    self._restore_monitoring_status()
+                    return AnalysisResult(
+                        status=AnalysisStatus.SUCCESS,
+                        replay_id=attached.replay_id,
+                        file_path=str(path),
+                        file_hash=file_hash,
+                        chests_opened=attached.chests_opened,
+                        source=DetectionSource.VISUAL_CV,
+                        attribution_mode=AttributionMode.VISUAL_LOCAL_HUD,
+                        match_timestamp=attached.played_at,
+                        match_duration_ms=attached.match_duration_ms,
+                        friendly_name=attached.friendly_name,
+                        engine_version=attached.engine_version,
+                        eliminations=attached.eliminations,
+                        placement=attached.placement,
+                        events=linked_events,
+                    )
+
         # Unreliable / failed analysis: NEVER record 0 as a valid match!
         if result.status != AnalysisStatus.LIVE_REPLAY:
             self.db.record_failed_analysis(result)
-            self._emit_error(path.name, result.error_message)
-            self._emit_status(
-                StatusEvent(
-                    level="error",
-                    label="ANALYSIS ERROR",
-                    detail=result.error_message,
+            # In hybrid mode while Visual CV is live-counting, avoid red alarm spam for
+            # expected UE5 Oodle/protocol replay limitations (still logged in Tab 3).
+            visual_active = self._live_visual is not None and self._live_visual.is_running
+            quiet_hybrid_fallback = (
+                self.config.detection_mode == "hybrid"
+                and visual_active
+                and result.status
+                in (
+                    AnalysisStatus.DECOMPRESSION_REQUIRED,
+                    AnalysisStatus.UNSUPPORTED_FORMAT,
                 )
             )
+            if quiet_hybrid_fallback:
+                self._restore_monitoring_status()
+            else:
+                self._emit_error(path.name, result.error_message)
+                self._emit_status(
+                    StatusEvent(
+                        level="error",
+                        label="ANALYSIS ERROR",
+                        detail=result.error_message,
+                    )
+                )
         else:
             self._restore_monitoring_status()
         return result
@@ -349,6 +401,7 @@ class ChestMemoryController:
             if not events:
                 return None
             self._live_visual_events.clear()
+            self._live_visual_session_id = None
             self.counter.reset_live_match()
 
         now = datetime.now(timezone.utc)
@@ -377,8 +430,6 @@ class ChestMemoryController:
     def _handle_live_visual_chest(self, event: ChestEventRecord) -> None:
         now_mono = time.monotonic()
         with self._lock:
-            self._live_visual_events.append(event)
-            live_count = self.counter.increment_live_match(1)
             # Start a fresh live session ID if idle > 4 minutes between matches
             if (
                 self._live_visual_session_id is None
@@ -387,37 +438,30 @@ class ChestMemoryController:
                 self._live_visual_session_id = datetime.now(timezone.utc).strftime(
                     "%Y%m%d_%H%M%S_%f"
                 )
+                self._live_visual_events.clear()
                 self.counter.reset_live_match()
-                live_count = self.counter.increment_live_match(1)
+            self._live_visual_events.append(event)
+            live_count = self.counter.increment_live_match(1)
             session_id = self._live_visual_session_id
             self._live_visual_last_event_mono = now_mono
 
-        if self.config.detection_mode == "visual":
-            # Persist immediately into SQLite and animate counter in real time!
-            self.db.record_live_visual_chest(
-                session_id=session_id,
-                event=event,
-                friendly_name="Live Visual CV Match",
+        # Persist immediately in BOTH `visual` and `hybrid` modes so the hero counter
+        # animates +1 live the instant a chest is opened (and never needs manual retry!).
+        self.db.record_live_visual_chest(
+            session_id=session_id,
+            event=event,
+            friendly_name="Live Visual CV Match",
+        )
+        snap = self.stats_service.get_snapshot()
+        self.counter.sync_total(snap.total_chests)
+        self._emit_stats(snap)
+        self._emit_status(
+            StatusEvent(
+                level="active",
+                label=f"CHEST +{live_count} (LIVE CV)",
+                detail=f"Открыт сундук ({event.confidence:.0%} уверенность)",
             )
-            snap = self.stats_service.get_snapshot()
-            self.counter.sync_total(snap.total_chests)
-            self._emit_stats(snap)
-            self._emit_status(
-                StatusEvent(
-                    level="active",
-                    label=f"CHEST +{live_count} (LIVE CV)",
-                    detail=f"Открыт сундук ({event.confidence:.0%} уверенность)",
-                )
-            )
-        else:
-            # Hybrid mode: show live CV detections while waiting for .replay completion
-            self._emit_status(
-                StatusEvent(
-                    level="active",
-                    label=f"MONITORING (+{live_count} CV)",
-                    detail=f"Обнаружено открытий в текущей катке (Visual CV): {live_count}",
-                )
-            )
+        )
 
     def _handle_visual_diagnostics(self, diag: VisualDiagnostics) -> None:
         if diag.black_frame_warning and not self._visual_black_alerted:

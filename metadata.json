@@ -1,0 +1,6 @@
+{
+  "name": "ChestMemory",
+  "description": "Automatic opened chest counter for Fortnite on Windows (Python, PySide6, SQLite, OpenCV, Watchdog)",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

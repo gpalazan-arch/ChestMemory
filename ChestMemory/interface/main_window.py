@@ -169,7 +169,7 @@ class ChestMemoryMainWindow(QWidget):
             on_toggle_window=self.toggle_visibility,
             on_toggle_topmost=self.set_always_on_top,
             on_scan_now=self._scan_now,
-            on_open_settings=lambda: self.open_settings(0),
+            on_open_settings=lambda _checked=False: self.open_settings(0),
             on_create_backup=self._create_backup,
             on_quit=self.quit_application,
             always_on_top=self.controller.config.always_on_top,
@@ -231,7 +231,7 @@ class ChestMemoryMainWindow(QWidget):
         btn_settings.setObjectName("HeaderIconBtn")
         btn_settings.setToolTip("Настройки, история и бэкапы")
         btn_settings.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_settings.clicked.connect(lambda: self.open_settings(0))
+        btn_settings.clicked.connect(lambda _checked=False: self.open_settings(0))
         header.addWidget(btn_settings)
         card_layout.addLayout(header)
 
@@ -281,7 +281,7 @@ class ChestMemoryMainWindow(QWidget):
         self.btn_status = QPushButton("MONITORING ACTIVE")
         self.btn_status.setObjectName("StatusPill")
         self.btn_status.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_status.clicked.connect(lambda: self.open_settings(2))
+        self.btn_status.clicked.connect(lambda _checked=False: self.open_settings(2))
         status_row.addWidget(self.btn_status, 1)
         card_layout.addLayout(status_row)
 
@@ -441,7 +441,7 @@ class ChestMemoryMainWindow(QWidget):
 
     def _create_backup(self) -> None:
         info = self.controller.create_manual_backup()
-        self.tray.notify_error("Резервная копия", f"Сохранена: {info.path.name}")
+        self.tray.notify_info("Резервная копия", f"Сохранена: {info.path.name}")
 
     def quit_application(self) -> None:
         self._quitting = True

@@ -180,7 +180,9 @@ class SettingsDialog(QDialog):
         btn_browse_dir.clicked.connect(self._browse_replay_dir)
         btn_auto_dir = QPushButton("Авто")
         btn_auto_dir.clicked.connect(
-            lambda: self.edit_replay_dir.setText(str(detect_default_fortnite_replay_dir()))
+            lambda _checked=False: self.edit_replay_dir.setText(
+                str(detect_default_fortnite_replay_dir())
+            )
         )
         replay_row.addWidget(self.edit_replay_dir, 1)
         replay_row.addWidget(btn_browse_dir)

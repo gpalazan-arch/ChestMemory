@@ -20,17 +20,17 @@ def build_app_icon(size: int = 64) -> QIcon:
     margin = size * 0.06
     bg_rect = QRectF(margin, margin, size - 2 * margin, size - 2 * margin)
     bg_grad = QLinearGradient(0, 0, size, size)
-    bg_grad.addColorStop(0.0, QColor("#171C26"))
-    bg_grad.addColorStop(1.0, QColor("#0B0E14"))
+    bg_grad.setColorAt(0.0, QColor("#171C26"))
+    bg_grad.setColorAt(1.0, QColor("#0B0E14"))
     painter.setBrush(QBrush(bg_grad))
     painter.setPen(QPen(QColor("#2A3344"), max(1.0, size * 0.03)))
     painter.drawRoundedRect(bg_rect, size * 0.22, size * 0.22)
 
     # Stylized golden Fortnite chest silhouette
     gold_grad = QLinearGradient(0, size * 0.24, 0, size * 0.78)
-    gold_grad.addColorStop(0.0, QColor("#FDE047"))
-    gold_grad.addColorStop(0.55, QColor("#F59E0B"))
-    gold_grad.addColorStop(1.0, QColor("#B45309"))
+    gold_grad.setColorAt(0.0, QColor("#FDE047"))
+    gold_grad.setColorAt(0.55, QColor("#F59E0B"))
+    gold_grad.setColorAt(1.0, QColor("#B45309"))
 
     chest_x = size * 0.22
     chest_w = size * 0.56
@@ -81,7 +81,8 @@ class ChestTrayIcon(QSystemTrayIcon):
 
         self.setToolTip("ChestMemory — Fortnite Chest Counter")
 
-        menu = QMenu()
+        menu = QMenu(parent)
+        self._menu = menu
         menu.setStyleSheet(
             """
             QMenu {
@@ -159,6 +160,15 @@ class ChestTrayIcon(QSystemTrayIcon):
             self.showMessage(
                 "ChestMemory — Матч обработан",
                 f"+{chests_opened} сундуков • Всего: {total_formatted}",
+                QSystemTrayIcon.MessageIcon.Information,
+                3500,
+            )
+
+    def notify_info(self, title: str, message: str) -> None:
+        if self.supportsMessages():
+            self.showMessage(
+                f"ChestMemory — {title}",
+                message[:220],
                 QSystemTrayIcon.MessageIcon.Information,
                 3500,
             )

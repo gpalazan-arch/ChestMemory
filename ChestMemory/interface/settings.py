@@ -38,20 +38,20 @@ from detector.visual_detector import enumerate_monitors
 
 DIALOG_STYLESHEET = """
 QDialog {
-    background-color: #0E1117;
-    color: #E6EDF3;
+    background-color: #090709;
+    color: #F3ECEE;
     font-family: "Segoe UI";
     font-size: 13px;
 }
 QTabWidget::pane {
-    border: 1px solid #222B3A;
+    border: 1px solid #35161C;
     border-radius: 10px;
-    background-color: #131822;
+    background-color: #110B0E;
     padding: 8px;
 }
 QTabBar::tab {
-    background-color: #0E1117;
-    color: #8B97AD;
+    background-color: #090709;
+    color: #9D8186;
     padding: 8px 16px;
     margin-right: 4px;
     border-top-left-radius: 8px;
@@ -59,62 +59,101 @@ QTabBar::tab {
     font-weight: 600;
 }
 QTabBar::tab:selected {
-    background-color: #131822;
-    color: #F8FAFC;
-    border: 1px solid #222B3A;
+    background-color: #180C10;
+    color: #FF8C42;
+    border: 1px solid #4A1C24;
     border-bottom: none;
 }
 QLabel {
-    color: #D8E0EE;
+    color: #E8DCE0;
 }
 QLineEdit, QComboBox, QSpinBox {
-    background-color: #0B0F17;
-    color: #F1F5F9;
-    border: 1px solid #253044;
+    background-color: #090608;
+    color: #F8F4F5;
+    border: 1px solid #38181F;
     border-radius: 6px;
     padding: 6px 10px;
 }
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus {
-    border-color: #F59E0B;
+    border-color: #F97316;
+}
+QComboBox QAbstractItemView {
+    background-color: #120B0E;
+    color: #F8F4F5;
+    selection-background-color: #3B161C;
+    selection-color: #FF8C42;
+    border: 1px solid #4A1C24;
 }
 QPushButton {
-    background-color: #1B2434;
-    color: #E6EDF3;
-    border: 1px solid #2B384F;
+    background-color: #1C0F13;
+    color: #F3ECEE;
+    border: 1px solid #3F1B22;
     border-radius: 6px;
     padding: 7px 14px;
     font-weight: 600;
 }
 QPushButton:hover {
-    background-color: #253147;
-    border-color: #3D5070;
+    background-color: #2B141A;
+    border-color: #EF4444;
+    color: #FFFFFF;
 }
 QPushButton#PrimaryButton {
-    background-color: #D97706;
-    color: #0B0E14;
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 1, y2: 0,
+        stop: 0 #DC2626,
+        stop: 1 #EA580C
+    );
+    color: #FFFFFF;
     border: none;
 }
 QPushButton#PrimaryButton:hover {
-    background-color: #F59E0B;
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 1, y2: 0,
+        stop: 0 #EF4444,
+        stop: 1 #F97316
+    );
 }
 QTableWidget, QListWidget {
-    background-color: #0B0F17;
-    color: #E2E8F0;
-    border: 1px solid #222B3A;
+    background-color: #090608;
+    color: #F1E8EA;
+    border: 1px solid #33151B;
     border-radius: 6px;
-    gridline-color: #1C2433;
+    gridline-color: #211015;
 }
 QHeaderView::section {
-    background-color: #161D2B;
-    color: #94A3B8;
+    background-color: #180C10;
+    color: #C78C84;
     border: none;
-    border-bottom: 1px solid #253044;
+    border-bottom: 1px solid #3B1820;
     padding: 6px 8px;
     font-weight: 600;
 }
 QCheckBox {
     spacing: 8px;
-    color: #D8E0EE;
+    color: #E8DCE0;
+}
+QCheckBox::indicator {
+    width: 15px;
+    height: 15px;
+    border-radius: 4px;
+    border: 1px solid #52212A;
+    background-color: #0B0709;
+}
+QCheckBox::indicator:checked {
+    background-color: #EA580C;
+    border-color: #F97316;
+}
+QSlider::groove:horizontal {
+    height: 4px;
+    background: #2D141A;
+    border-radius: 2px;
+}
+QSlider::handle:horizontal {
+    background: #F97316;
+    border: 1px solid #DC2626;
+    width: 14px;
+    margin: -5px 0;
+    border-radius: 7px;
 }
 """
 
@@ -146,6 +185,11 @@ class SettingsDialog(QDialog):
         root.addWidget(self.tabs)
 
         footer = QHBoxLayout()
+        lbl_wm = QLabel("tg @newreligionsoft")
+        lbl_wm.setStyleSheet(
+            'color: #7D443D; font-family: "Consolas", "Segoe UI"; font-size: 11px; font-weight: 600;'
+        )
+        footer.addWidget(lbl_wm)
         footer.addStretch()
 
         btn_cancel = QPushButton("Закрыть")
@@ -259,6 +303,12 @@ class SettingsDialog(QDialog):
         self.chk_topmost.setChecked(cfg.always_on_top)
         layout.addWidget(self.chk_topmost)
 
+        self.chk_click_through = QCheckBox(
+            "Сквозь окно (Click-Through) — курсор не цепляет виджет в Fortnite (откл. через трей)"
+        )
+        self.chk_click_through.setChecked(cfg.click_through)
+        layout.addWidget(self.chk_click_through)
+
         self.chk_tray = QCheckBox("Сворачивать в системный трей при закрытии")
         self.chk_tray.setChecked(cfg.minimize_to_tray)
         layout.addWidget(self.chk_tray)
@@ -294,7 +344,7 @@ class SettingsDialog(QDialog):
         layout.setSpacing(10)
 
         self.lbl_summary = QLabel()
-        self.lbl_summary.setStyleSheet("color: #94A3B8; font-weight: 600;")
+        self.lbl_summary.setStyleSheet("color: #C7A39E; font-weight: 600;")
         layout.addWidget(self.lbl_summary)
 
         self.table_matches = QTableWidget(0, 6)
@@ -326,19 +376,19 @@ class SettingsDialog(QDialog):
         layout.setSpacing(10)
 
         lbl_cv = QLabel("Диагностика Visual CV (требует режим «В окне без рамки» в Fortnite):")
-        lbl_cv.setStyleSheet("color: #FCD34D; font-weight: 600;")
+        lbl_cv.setStyleSheet("color: #FB923C; font-weight: 600;")
         layout.addWidget(lbl_cv)
 
         self.lbl_cv_diag = QLabel("Visual CV не активен.")
         self.lbl_cv_diag.setWordWrap(True)
         self.lbl_cv_diag.setStyleSheet(
-            "background-color: #0B0F17; border: 1px solid #222B3A; "
-            "border-radius: 6px; padding: 8px; color: #CBD5E1; font-family: Consolas;"
+            "background-color: #090608; border: 1px solid #35161C; "
+            "border-radius: 6px; padding: 8px; color: #E8DCE0; font-family: Consolas;"
         )
         layout.addWidget(self.lbl_cv_diag)
 
         lbl_err = QLabel("Необработанные / ошибочные реплеи (никогда не записываются как 0):")
-        lbl_err.setStyleSheet("color: #FCA5A5; font-weight: 600;")
+        lbl_err.setStyleSheet("color: #F87171; font-weight: 600;")
         layout.addWidget(lbl_err)
 
         self.list_errors = QListWidget()
@@ -350,7 +400,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(btn_retry, alignment=Qt.AlignmentFlag.AlignLeft)
 
         lbl_bak = QLabel("Резервные копии SQLite (с проверкой SHA-256 и integrity_check):")
-        lbl_bak.setStyleSheet("color: #93C5FD; font-weight: 600;")
+        lbl_bak.setStyleSheet("color: #FDBA74; font-weight: 600;")
         layout.addWidget(lbl_bak)
 
         self.list_backups = QListWidget()
@@ -468,6 +518,7 @@ class SettingsDialog(QDialog):
             window_opacity=self.slider_opacity.value() / 100.0,
             backup_retention_count=int(self.spin_retention.value()),
             always_on_top=self.chk_topmost.isChecked(),
+            click_through=self.chk_click_through.isChecked(),
             minimize_to_tray=self.chk_tray.isChecked(),
             auto_scan_existing=self.chk_autoscan.isChecked(),
             auto_backup_enabled=self.chk_autobackup.isChecked(),

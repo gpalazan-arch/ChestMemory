@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QMenu, QSystemTrayIcon, QWidget
 
 
 def build_app_icon(size: int = 64) -> QIcon:
-    """Render a crisp minimalist ChestMemory icon programmatically (no external asset needed)."""
+    """Render a crisp obsidian/crimson/ember ChestMemory icon programmatically."""
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
 
@@ -20,24 +20,25 @@ def build_app_icon(size: int = 64) -> QIcon:
     margin = size * 0.06
     bg_rect = QRectF(margin, margin, size - 2 * margin, size - 2 * margin)
     bg_grad = QLinearGradient(0, 0, size, size)
-    bg_grad.setColorAt(0.0, QColor("#171C26"))
-    bg_grad.setColorAt(1.0, QColor("#0B0E14"))
+    bg_grad.setColorAt(0.0, QColor("#1A0C10"))
+    bg_grad.setColorAt(0.55, QColor("#0B080A"))
+    bg_grad.setColorAt(1.0, QColor("#050507"))
     painter.setBrush(QBrush(bg_grad))
-    painter.setPen(QPen(QColor("#2A3344"), max(1.0, size * 0.03)))
+    painter.setPen(QPen(QColor("#7F1D1D"), max(1.2, size * 0.032)))
     painter.drawRoundedRect(bg_rect, size * 0.22, size * 0.22)
 
-    # Stylized golden Fortnite chest silhouette
-    gold_grad = QLinearGradient(0, size * 0.24, 0, size * 0.78)
-    gold_grad.setColorAt(0.0, QColor("#FDE047"))
-    gold_grad.setColorAt(0.55, QColor("#F59E0B"))
-    gold_grad.setColorAt(1.0, QColor("#B45309"))
+    # Stylized crimson-to-ember chest silhouette
+    ember_grad = QLinearGradient(0, size * 0.24, 0, size * 0.78)
+    ember_grad.setColorAt(0.0, QColor("#FB923C"))
+    ember_grad.setColorAt(0.45, QColor("#F97316"))
+    ember_grad.setColorAt(1.0, QColor("#DC2626"))
 
     chest_x = size * 0.22
     chest_w = size * 0.56
     lid_rect = QRectF(chest_x, size * 0.27, chest_w, size * 0.19)
     body_rect = QRectF(chest_x + size * 0.02, size * 0.48, chest_w - size * 0.04, size * 0.25)
 
-    painter.setBrush(QBrush(gold_grad))
+    painter.setBrush(QBrush(ember_grad))
     painter.setPen(Qt.PenStyle.NoPen)
     painter.drawRoundedRect(lid_rect, size * 0.06, size * 0.06)
     painter.drawRoundedRect(body_rect, size * 0.05, size * 0.05)
@@ -51,11 +52,11 @@ def build_app_icon(size: int = 64) -> QIcon:
         latch_w,
         latch_h,
     )
-    painter.setBrush(QBrush(QColor("#FFFBEB")))
+    painter.setBrush(QBrush(QColor("#FFF7ED")))
     painter.drawRoundedRect(latch_rect, size * 0.03, size * 0.03)
 
-    # Subtle glowing dot
-    painter.setBrush(QBrush(QColor("#22C55E")))
+    # Glowing ember status dot
+    painter.setBrush(QBrush(QColor("#EF4444")))
     painter.drawEllipse(QPointF(size * 0.80, size * 0.20), size * 0.075, size * 0.075)
 
     painter.end()
@@ -63,32 +64,34 @@ def build_app_icon(size: int = 64) -> QIcon:
 
 
 class ChestTrayIcon(QSystemTrayIcon):
-    """Windows system tray icon with quick actions and match toast notifications."""
+    """Windows system tray icon with quick actions, click-through unlock, and notifications."""
 
     def __init__(
         self,
         parent: Optional[QWidget],
         on_toggle_window: Callable[[], None],
         on_toggle_topmost: Callable[[bool], None],
+        on_toggle_click_through: Callable[[bool], None],
         on_scan_now: Callable[[], None],
         on_open_settings: Callable[[], None],
         on_create_backup: Callable[[], None],
         on_quit: Callable[[], None],
         always_on_top: bool = True,
+        click_through: bool = False,
     ) -> None:
         super().__init__(build_app_icon(64), parent)
         self._on_toggle_window = on_toggle_window
 
-        self.setToolTip("ChestMemory — Fortnite Chest Counter")
+        self.setToolTip("ChestMemory — tg @newreligionsoft")
 
         menu = QMenu(parent)
         self._menu = menu
         menu.setStyleSheet(
             """
             QMenu {
-                background-color: #131822;
-                color: #E5E9F0;
-                border: 1px solid #263042;
+                background-color: #0D090B;
+                color: #F4F0F1;
+                border: 1px solid #3B181E;
                 border-radius: 8px;
                 padding: 6px;
                 font-family: "Segoe UI";
@@ -99,20 +102,26 @@ class ChestTrayIcon(QSystemTrayIcon):
                 border-radius: 5px;
             }
             QMenu::item:selected {
-                background-color: #1F293B;
-                color: #FFFFFF;
+                background-color: #2A1216;
+                color: #FF8C42;
             }
             QMenu::separator {
                 height: 1px;
-                background: #232C3D;
+                background: #2C1519;
                 margin: 5px 8px;
             }
             """
         )
 
         self.act_toggle = QAction("Показать / Скрыть окно", menu)
-        self.act_toggle.triggered.connect(on_toggle_window)
+        self.act_toggle.triggered.connect(lambda _checked=False: on_toggle_window())
         menu.addAction(self.act_toggle)
+
+        self.act_click_through = QAction("Сквозь окно (не мешать игре)", menu)
+        self.act_click_through.setCheckable(True)
+        self.act_click_through.setChecked(click_through)
+        self.act_click_through.toggled.connect(on_toggle_click_through)
+        menu.addAction(self.act_click_through)
 
         self.act_topmost = QAction("Поверх других окон", menu)
         self.act_topmost.setCheckable(True)
@@ -123,21 +132,21 @@ class ChestTrayIcon(QSystemTrayIcon):
         menu.addSeparator()
 
         act_scan = QAction("Сканировать реплеи сейчас", menu)
-        act_scan.triggered.connect(on_scan_now)
+        act_scan.triggered.connect(lambda _checked=False: on_scan_now())
         menu.addAction(act_scan)
 
         act_settings = QAction("Настройки и статистика...", menu)
-        act_settings.triggered.connect(on_open_settings)
+        act_settings.triggered.connect(lambda _checked=False: on_open_settings())
         menu.addAction(act_settings)
 
         act_backup = QAction("Создать резервную копию", menu)
-        act_backup.triggered.connect(on_create_backup)
+        act_backup.triggered.connect(lambda _checked=False: on_create_backup())
         menu.addAction(act_backup)
 
         menu.addSeparator()
 
         act_quit = QAction("Выход", menu)
-        act_quit.triggered.connect(on_quit)
+        act_quit.triggered.connect(lambda _checked=False: on_quit())
         menu.addAction(act_quit)
 
         self.setContextMenu(menu)
@@ -154,6 +163,11 @@ class ChestTrayIcon(QSystemTrayIcon):
         self.act_topmost.blockSignals(True)
         self.act_topmost.setChecked(enabled)
         self.act_topmost.blockSignals(False)
+
+    def sync_click_through(self, enabled: bool) -> None:
+        self.act_click_through.blockSignals(True)
+        self.act_click_through.setChecked(enabled)
+        self.act_click_through.blockSignals(False)
 
     def notify_match(self, chests_opened: int, total_formatted: str) -> None:
         if self.supportsMessages():

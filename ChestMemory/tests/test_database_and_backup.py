@@ -143,6 +143,7 @@ class TestDatabaseAndBackup(unittest.TestCase):
         cfg = AppConfig(
             replay_dir=r"C:\Custom\Demos",
             always_on_top=False,
+            click_through=True,
             detection_mode="visual",
             window_x=220,
             window_y=140,
@@ -152,6 +153,7 @@ class TestDatabaseAndBackup(unittest.TestCase):
         loaded = self.db.load_config()
         self.assertEqual(loaded.replay_dir, r"C:\Custom\Demos")
         self.assertFalse(loaded.always_on_top)
+        self.assertTrue(loaded.click_through)
         self.assertEqual(loaded.detection_mode, "visual")
         self.assertEqual(loaded.window_x, 220)
         self.assertAlmostEqual(loaded.window_opacity, 0.88)

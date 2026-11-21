@@ -147,6 +147,7 @@ class AppConfig:
 
     replay_dir: str = ""
     always_on_top: bool = True
+    click_through: bool = False
     minimize_to_tray: bool = True
     auto_scan_existing: bool = True
     detection_mode: str = "hybrid"  # "replay", "visual", "hybrid"

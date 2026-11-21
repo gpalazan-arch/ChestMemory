@@ -64,10 +64,10 @@ class VisualDetectorConfig:
     ring_clear_threshold: float = 0.15
     min_search_duration_s: float = 0.18
     max_search_duration_s: float = 1.90
-    confirm_window_s: float = 0.95
+    confirm_window_s: float = 0.38
     burst_threshold: float = 0.40
     xp_threshold: float = 0.38
-    cooldown_s: float = 1.50
+    cooldown_s: float = 1.15
     prompt_timeout_s: float = 2.20
     min_monotonic_steps: int = 2
 
@@ -217,9 +217,9 @@ class ChestOpeningFSM:
                 self._reset_to_idle()
                 return None
 
-            # Immediate confirmation if ring hit >= 90% AND burst/XP already triggered
+            # Immediate confirmation if ring hit >= 84% AND burst/XP already triggered
             if (
-                fill >= 0.90
+                fill >= 0.84
                 and elapsed >= self.cfg.min_search_duration_s
                 and self._monotonic_steps >= self.cfg.min_monotonic_steps
                 and (

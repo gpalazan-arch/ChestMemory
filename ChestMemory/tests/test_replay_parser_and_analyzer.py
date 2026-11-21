@@ -262,6 +262,45 @@ class TestReplayParserAndAnalyzer(unittest.TestCase):
         self.assertEqual(result.source, DetectionSource.EXTERNAL_REPLAY_BRIDGE)
         self.assertEqual(result.replay_id, "ext-guid-001")
 
+    def test_ue5_file_version_7_custom_versions_header(self) -> None:
+        # Reproduce UE5 FileVersion=7 where CustomVersions GUID sits at bytes 12..28
+        # (offset 20..24 is Guid.C = 0xBA440056 = -1169960106)
+        raw = build_replay_bytes(
+            match_guid="fedcba98-7654-3210-fedc-ba9876543210",
+            friendly_name="UnsavedReplay-2026.11.21-17.58.48",
+            file_version=7,
+            custom_versions=[
+                ("12345678-9abc-def0-ba44-005611223344", 12),
+                ("00112233-4455-6677-8899-aabbccddeeff", 3),
+            ],
+            local_pawns=["ue5_pawn"],
+            updates=[
+                ContainerUpdate(
+                    3500,
+                    "chest_ue5_1",
+                    "Tiered_Chest_Athena_C_UAID_01",
+                    b_already_searched=True,
+                    searching_pawn_guid="ue5_pawn",
+                )
+            ],
+        )
+        replay_file = self.root / "ue5_v7.replay"
+        replay_file.write_bytes(raw)
+
+        self.assertFalse(is_replay_live(replay_file))
+        parsed = self.parser.parse_file(replay_file)
+        self.assertEqual(parsed.meta.file_version, 7)
+        self.assertEqual(len(parsed.meta.custom_versions), 2)
+        self.assertEqual(parsed.meta.friendly_name, "UnsavedReplay-2026.11.21-17.58.48")
+        self.assertIsNotNone(parsed.header)
+        assert parsed.header is not None
+        self.assertEqual(len(parsed.header.custom_versions), 2)
+        self.assertEqual(parsed.header.guid, "fedcba98-7654-3210-fedc-ba9876543210")
+
+        res = self.analyzer.analyze_file(replay_file)
+        self.assertTrue(res.is_reliable)
+        self.assertEqual(res.chests_opened, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

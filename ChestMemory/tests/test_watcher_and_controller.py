@@ -15,8 +15,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import main as cli_main
 from core.controller import ChestMemoryController
-from database.models import AnalysisStatus
+from database.models import AnalysisStatus, ChestEventRecord
 from detector.replay_analyzer import ContainerUpdate
+from detector.visual_detector import VisualDiagnostics
 from services.replay_watcher import ReplayWatcher
 from tests.replay_fixture_builder import build_replay_bytes
 
@@ -161,6 +162,40 @@ class TestWatcherAndController(unittest.TestCase):
 
         ctrl = ChestMemoryController(data_dir=self.data_dir)
         self.assertEqual(ctrl.get_stats().total_chests, 2)
+
+    def test_visual_mode_persists_chests_immediately_and_warns_on_black_frame(self) -> None:
+        ctrl = ChestMemoryController(data_dir=self.data_dir)
+        cfg = replace(ctrl.config, detection_mode="visual", auto_backup_enabled=False)
+        ctrl.update_config(cfg, restart_monitoring=False)
+
+        emitted_stats = []
+        emitted_statuses = []
+        ctrl.on_stats_updated(emitted_stats.append)
+        ctrl.on_status_changed(emitted_statuses.append)
+
+        # Simulate two live visual chest openings
+        ctrl._handle_live_visual_chest(
+            ChestEventRecord(timestamp_ms=12_000, container_guid="v1", container_class="Visual_Chest_Opened")
+        )
+        ctrl._handle_live_visual_chest(
+            ChestEventRecord(timestamp_ms=25_000, container_guid="v2", container_class="Visual_Chest_Opened")
+        )
+
+        self.assertEqual(len(emitted_stats), 2)
+        self.assertEqual(emitted_stats[-1].total_chests, 2)
+        self.assertEqual(emitted_stats[-1].last_match_chests, 2)
+        self.assertEqual(emitted_stats[-1].total_matches, 1)
+
+        # Verify persisted across controller restart
+        reloaded = ChestMemoryController(data_dir=self.data_dir)
+        self.assertEqual(reloaded.get_stats().total_chests, 2)
+
+        # Verify Exclusive Fullscreen black-frame warning surfaces clearly
+        ctrl._handle_visual_diagnostics(
+            VisualDiagnostics(running=True, frame_mean_luma=0.0, black_frame_warning=True)
+        )
+        self.assertEqual(emitted_statuses[-1].level, "warning")
+        self.assertIn("BLACK SCREEN", emitted_statuses[-1].label)
 
 
 if __name__ == "__main__":

@@ -19,6 +19,8 @@ Matches the exact target visual architecture:
 
 from __future__ import annotations
 
+import ctypes
+import sys
 from dataclasses import replace
 from typing import Optional
 
@@ -162,6 +164,13 @@ class ChestMemoryMainWindow(QWidget):
         self._anim_timer = QTimer(self)
         self._anim_timer.setInterval(16)
         self._anim_timer.timeout.connect(self._tick_animation)
+
+        # Gentle Win32 topmost z-order keepalive for Borderless Fullscreen games (SWP_NOACTIVATE)
+        self._topmost_timer = QTimer(self)
+        self._topmost_timer.setInterval(1500)
+        self._topmost_timer.timeout.connect(self._enforce_win32_topmost)
+        if self.controller.config.always_on_top:
+            self._topmost_timer.start()
 
         # System tray integration
         self.tray = ChestTrayIcon(
@@ -312,6 +321,41 @@ class ChestMemoryMainWindow(QWidget):
         self.setWindowFlags(flags)
         if was_visible:
             self.show()
+        if hasattr(self, "_topmost_timer"):
+            if self.controller.config.always_on_top:
+                self._topmost_timer.start()
+            else:
+                self._topmost_timer.stop()
+        self._enforce_win32_topmost()
+
+    def _enforce_win32_topmost(self) -> None:
+        """Keep window above Borderless/Windowed Fullscreen DirectX games without stealing focus.
+
+        Note: Windows Exclusive Fullscreen bypasses DWM and blocks all non-injected windows.
+        For visible overlay + OpenCV capture, Fortnite must use Windowed Fullscreen.
+        """
+        if sys.platform != "win32" or not self.isVisible() or not self.controller.config.always_on_top:
+            return
+        try:
+            user32 = ctypes.windll.user32
+            set_window_pos = user32.SetWindowPos
+            set_window_pos.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_uint,
+            ]
+            set_window_pos.restype = ctypes.c_bool
+
+            hwnd = ctypes.c_void_p(int(self.winId()))
+            hwnd_topmost = ctypes.c_void_p(-1)
+            swp_flags = 0x0002 | 0x0001 | 0x0010  # SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+            set_window_pos(hwnd, hwnd_topmost, 0, 0, 0, 0, swp_flags)
+        except Exception:
+            pass
 
     def _restore_window_position(self) -> None:
         cfg = self.controller.config

@@ -83,6 +83,8 @@ def build_replay_bytes(
     match_guid: str = "12345678-1234-5678-1234-567812345678",
     friendly_name: str = "UnsavedReplay-2026.11.21",
     length_in_ms: int = 920_000,
+    file_version: int = int(ReplayVersionHistory.HISTORY_ENCRYPTION),
+    custom_versions: Iterable[tuple[str, int]] = (),
     is_live: bool = False,
     is_compressed: bool = False,
     compress_with_zlib: bool = False,
@@ -99,10 +101,16 @@ def build_replay_bytes(
 ) -> bytes:
     """Construct a valid Unreal Engine / Fortnite `.replay` binary archive."""
     ts = timestamp or datetime(2026, 11, 21, 12, 0, 0, tzinfo=timezone.utc)
-    file_version = int(ReplayVersionHistory.HISTORY_ENCRYPTION)
+    cv_list = list(custom_versions)
 
     meta = bytearray()
-    meta += struct.pack("<IIIII", FILE_MAGIC, file_version, length_in_ms, 23, 39100231)
+    meta += struct.pack("<II", FILE_MAGIC, file_version)
+    if file_version >= int(ReplayVersionHistory.HISTORY_CUSTOM_VERSIONS):
+        meta += struct.pack("<i", len(cv_list))
+        for cv_guid, cv_ver in cv_list:
+            meta += pack_guid(cv_guid)
+            meta += struct.pack("<i", cv_ver)
+    meta += struct.pack("<III", length_in_ms, 23, 39100231)
     meta += pack_fstring(friendly_name, utf16=utf16_friendly_name)
     meta += struct.pack("<I", 1 if is_live else 0)
     meta += struct.pack("<q", datetime_to_dotnet_ticks(ts))
@@ -114,7 +122,13 @@ def build_replay_bytes(
 
     # 1. Header Chunk (FNetworkDemoHeader)
     header_payload = bytearray()
-    header_payload += struct.pack("<IIIII", NETWORK_DEMO_HEADER_MAGIC, 23, 0xAABBCCDD, 28, 35)
+    header_payload += struct.pack("<II", NETWORK_DEMO_HEADER_MAGIC, 23)
+    if file_version >= int(ReplayVersionHistory.HISTORY_CUSTOM_VERSIONS):
+        header_payload += struct.pack("<i", len(cv_list))
+        for cv_guid, cv_ver in cv_list:
+            header_payload += pack_guid(cv_guid)
+            header_payload += struct.pack("<i", cv_ver)
+    header_payload += struct.pack("<III", 0xAABBCCDD, 28, 35)
     header_payload += pack_guid(match_guid)
     header_payload += struct.pack("<HHHI", 5, 4, 2, 39100231)
     header_payload += pack_fstring("++Fortnite+Release-32.10")

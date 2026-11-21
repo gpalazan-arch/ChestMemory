@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,7 +26,11 @@ from database.models import (
 )
 from detector.replay_analyzer import ReplayAnalyzer
 from detector.replay_parser import compute_file_sha256, detect_default_fortnite_replay_dir
-from detector.visual_detector import LiveVisualMonitor, VisualChestDetector
+from detector.visual_detector import (
+    LiveVisualMonitor,
+    VisualChestDetector,
+    VisualDiagnostics,
+)
 from services.backup_service import BackupInfo, BackupService
 from services.replay_watcher import ReplayWatcher
 
@@ -71,6 +76,9 @@ class ChestMemoryController:
         self._watcher: Optional[ReplayWatcher] = None
         self._live_visual: Optional[LiveVisualMonitor] = None
         self._live_visual_events: list[ChestEventRecord] = []
+        self._live_visual_session_id: Optional[str] = None
+        self._live_visual_last_event_mono: float = 0.0
+        self._visual_black_alerted: bool = False
         self._lock = threading.RLock()
 
         # UI listener callbacks (connected to Qt Signals in PySide6 interface)
@@ -120,6 +128,13 @@ class ChestMemoryController:
     def get_failed_analyses(self, limit: int = 50) -> list[FailedAnalysisRecord]:
         return self.db.get_failed_analyses(limit=limit)
 
+    def get_visual_diagnostics(self) -> VisualDiagnostics:
+        with self._lock:
+            visual = self._live_visual
+        if visual is None:
+            return VisualDiagnostics(running=False)
+        return visual.diagnostics
+
     # ------------------------------------------------------------------
     # Monitoring lifecycle
     # ------------------------------------------------------------------
@@ -141,9 +156,11 @@ class ChestMemoryController:
                     started_any = True
 
             if mode in ("visual", "hybrid"):
+                self._visual_black_alerted = False
                 self._live_visual = LiveVisualMonitor(
                     on_chest_opened=self._handle_live_visual_chest,
                     on_error=self._handle_visual_error,
+                    on_diagnostics=self._handle_visual_diagnostics,
                     fps=self.config.visual_fps,
                     monitor_index=self.config.visual_monitor_index,
                 )
@@ -358,12 +375,33 @@ class ChestMemoryController:
         return None
 
     def _handle_live_visual_chest(self, event: ChestEventRecord) -> None:
+        now_mono = time.monotonic()
         with self._lock:
             self._live_visual_events.append(event)
             live_count = self.counter.increment_live_match(1)
+            # Start a fresh live session ID if idle > 4 minutes between matches
+            if (
+                self._live_visual_session_id is None
+                or (now_mono - self._live_visual_last_event_mono) > 240.0
+            ):
+                self._live_visual_session_id = datetime.now(timezone.utc).strftime(
+                    "%Y%m%d_%H%M%S_%f"
+                )
+                self.counter.reset_live_match()
+                live_count = self.counter.increment_live_match(1)
+            session_id = self._live_visual_session_id
+            self._live_visual_last_event_mono = now_mono
 
         if self.config.detection_mode == "visual":
-            # In pure Visual CV mode, persist each verified chest immediately into today's live session
+            # Persist immediately into SQLite and animate counter in real time!
+            self.db.record_live_visual_chest(
+                session_id=session_id,
+                event=event,
+                friendly_name="Live Visual CV Match",
+            )
+            snap = self.stats_service.get_snapshot()
+            self.counter.sync_total(snap.total_chests)
+            self._emit_stats(snap)
             self._emit_status(
                 StatusEvent(
                     level="active",
@@ -371,6 +409,32 @@ class ChestMemoryController:
                     detail=f"Открыт сундук ({event.confidence:.0%} уверенность)",
                 )
             )
+        else:
+            # Hybrid mode: show live CV detections while waiting for .replay completion
+            self._emit_status(
+                StatusEvent(
+                    level="active",
+                    label=f"MONITORING (+{live_count} CV)",
+                    detail=f"Обнаружено открытий в текущей катке (Visual CV): {live_count}",
+                )
+            )
+
+    def _handle_visual_diagnostics(self, diag: VisualDiagnostics) -> None:
+        if diag.black_frame_warning and not self._visual_black_alerted:
+            self._visual_black_alerted = True
+            self._emit_status(
+                StatusEvent(
+                    level="warning",
+                    label="BLACK SCREEN — SET BORDERLESS",
+                    detail=(
+                        "Захват экрана получает чёрный кадр (Полноэкранный режим Fortnite). "
+                        "Переключите Fortnite в «В окне без рамки» (Windowed Fullscreen)."
+                    ),
+                )
+            )
+        elif not diag.black_frame_warning and self._visual_black_alerted:
+            self._visual_black_alerted = False
+            self._restore_monitoring_status()
 
     def _handle_visual_error(self, message: str) -> None:
         self._emit_error("VisualDetector", message)

@@ -78,6 +78,7 @@ class ReplayMeta:
     is_compressed: bool = False
     is_encrypted: bool = False
     encryption_key: bytes = b""
+    custom_versions: list[tuple[str, int]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -97,6 +98,7 @@ class ReplayHeader:
     level_names_and_times: list[tuple[str, int]] = field(default_factory=list)
     flags: int = 0
     game_specific_data: list[str] = field(default_factory=list)
+    custom_versions: list[tuple[str, int]] = field(default_factory=list)
 
     @property
     def engine_version_str(self) -> str:
@@ -553,7 +555,7 @@ def is_replay_live(file_path: str | Path) -> Optional[bool]:
         return None
     try:
         with path.open("rb") as handle:
-            head = handle.read(4096)
+            head = handle.read(8192)
         if len(head) < 24:
             return None
         reader = BinaryReader(head)
@@ -561,6 +563,11 @@ def is_replay_live(file_path: str | Path) -> Optional[bool]:
         if magic != FILE_MAGIC:
             return None
         file_version = reader.read_uint32()
+        if file_version >= ReplayVersionHistory.HISTORY_CUSTOM_VERSIONS:
+            cv_count = reader.read_int32()
+            if cv_count < 0 or cv_count > 4096:
+                return None
+            reader.skip(cv_count * 20)  # 16-byte FGuid + 4-byte int32 version
         _length_ms = reader.read_uint32()
         _net_ver = reader.read_uint32()
         _changelist = reader.read_uint32()
@@ -670,6 +677,19 @@ class ReplayParser:
             )
 
         file_version = reader.read_uint32()
+
+        custom_versions: list[tuple[str, int]] = []
+        if file_version >= ReplayVersionHistory.HISTORY_CUSTOM_VERSIONS:
+            cv_count = reader.read_int32()
+            if cv_count < 0 or cv_count > 4096 or (cv_count * 20) > reader.remaining:
+                raise ReplayParseError(
+                    f"Invalid CustomVersions count {cv_count} for FileVersion={file_version}"
+                )
+            for _ in range(cv_count):
+                cv_guid = reader.read_guid()
+                cv_ver = reader.read_int32()
+                custom_versions.append((cv_guid, cv_ver))
+
         length_in_ms = reader.read_uint32()
         network_version = reader.read_uint32()
         changelist = reader.read_uint32()
@@ -713,6 +733,7 @@ class ReplayParser:
             is_compressed=is_compressed,
             is_encrypted=is_encrypted,
             encryption_key=encryption_key,
+            custom_versions=custom_versions,
         )
 
     def _parse_header_chunk(self, payload: bytes) -> ReplayHeader:
@@ -725,6 +746,20 @@ class ReplayParser:
             )
 
         network_version = reader.read_uint32()
+
+        # UE 5.1+ (ENetworkVersionHistory >= 18 / HISTORY_CUSTOM_VERSIONS) stores
+        # CustomVersions right after NetworkVersion in FNetworkDemoHeader.
+        header_custom_versions: list[tuple[str, int]] = []
+        if network_version >= 18 and reader.remaining >= 4:
+            saved_pos = reader.pos
+            cv_count = reader.read_int32()
+            if 0 <= cv_count <= 2048 and (cv_count * 20) <= (reader.remaining - 12):
+                for _ in range(cv_count):
+                    header_custom_versions.append((reader.read_guid(), reader.read_int32()))
+            else:
+                # Fallback for legacy/custom headers without CustomVersions block
+                reader.seek(saved_pos)
+
         network_checksum = reader.read_uint32()
         engine_proto = reader.read_uint32()
         game_proto = reader.read_uint32()
@@ -780,6 +815,7 @@ class ReplayParser:
             level_names_and_times=level_names_and_times,
             flags=flags,
             game_specific_data=game_specific_data,
+            custom_versions=header_custom_versions,
         )
 
     def _parse_event_chunk(self, payload: bytes, meta: ReplayMeta) -> ReplayEvent:

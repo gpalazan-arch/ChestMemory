@@ -6,7 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -160,6 +160,11 @@ class SettingsDialog(QDialog):
         self._refresh_history()
         self._refresh_diagnostics()
 
+        self._diag_timer = QTimer(self)
+        self._diag_timer.setInterval(1000)
+        self._diag_timer.timeout.connect(self._refresh_cv_diag)
+        self._diag_timer.start()
+
     # ------------------------------------------------------------------
     # Tab 1: General & Detector Settings
     # ------------------------------------------------------------------
@@ -303,12 +308,24 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(page)
         layout.setSpacing(10)
 
+        lbl_cv = QLabel("Диагностика Visual CV (требует режим «В окне без рамки» в Fortnite):")
+        lbl_cv.setStyleSheet("color: #FCD34D; font-weight: 600;")
+        layout.addWidget(lbl_cv)
+
+        self.lbl_cv_diag = QLabel("Visual CV не активен.")
+        self.lbl_cv_diag.setWordWrap(True)
+        self.lbl_cv_diag.setStyleSheet(
+            "background-color: #0B0F17; border: 1px solid #222B3A; "
+            "border-radius: 6px; padding: 8px; color: #CBD5E1; font-family: Consolas;"
+        )
+        layout.addWidget(self.lbl_cv_diag)
+
         lbl_err = QLabel("Необработанные / ошибочные реплеи (никогда не записываются как 0):")
         lbl_err.setStyleSheet("color: #FCA5A5; font-weight: 600;")
         layout.addWidget(lbl_err)
 
         self.list_errors = QListWidget()
-        self.list_errors.setMaximumHeight(140)
+        self.list_errors.setMaximumHeight(120)
         layout.addWidget(self.list_errors)
 
         btn_retry = QPushButton("Повторить анализ ошибочных файлов")
@@ -362,7 +379,29 @@ class SettingsDialog(QDialog):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table_matches.setItem(row_idx, col_idx, item)
 
+    def _refresh_cv_diag(self) -> None:
+        diag = self.controller.get_visual_diagnostics()
+        if not diag.running:
+            self.lbl_cv_diag.setText(
+                "Visual CV: остановлен (выберите режим «Гибридный» или «Только компьютерное зрение»)."
+            )
+        elif diag.black_frame_warning:
+            self.lbl_cv_diag.setText(
+                f"ВНИМАНИЕ: Чёрный кадр (luma={diag.frame_mean_luma}, {diag.frame_width}x{diag.frame_height}, "
+                f"{diag.fps} FPS). Переключите Fortnite в «В окне без рамки» (Windowed Fullscreen)!"
+            )
+        else:
+            self.lbl_cv_diag.setText(
+                f"Активен | {diag.frame_width}x{diag.frame_height} @ {diag.fps} FPS | "
+                f"luma={diag.frame_mean_luma} | FSM={diag.fsm_state} | "
+                f"prompt={diag.last_prompt_score:.2f} ring={diag.last_ring_fill:.2f} "
+                f"burst={diag.last_burst_score:.2f} xp={diag.last_xp_score:.2f} | "
+                f"сессия={diag.detected_session_chests}"
+            )
+
     def _refresh_diagnostics(self) -> None:
+        self._refresh_cv_diag()
+
         self.list_errors.clear()
         failed = self.controller.get_failed_analyses()
         if not failed:

@@ -157,6 +157,6 @@ class AppConfig:
     window_opacity: float = 0.96
     backup_retention_count: int = 15
     auto_backup_enabled: bool = True
-    visual_fps: float = 10.0
+    visual_fps: float = 15.0
     visual_monitor_index: int = 1
     file_stable_seconds: float = 4.0

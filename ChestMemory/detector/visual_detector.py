@@ -55,18 +55,18 @@ class VisualState(str, Enum):
 class VisualDetectorConfig:
     """Tunable thresholds for the temporal chest-opening CV pipeline."""
 
-    prompt_threshold: float = 0.42
+    prompt_threshold: float = 0.36
     ring_start_threshold: float = 0.12
-    ring_complete_threshold: float = 0.78
-    ring_high_confidence_threshold: float = 0.88
-    ring_clear_threshold: float = 0.14
-    min_search_duration_s: float = 0.28
-    max_search_duration_s: float = 1.75
+    ring_complete_threshold: float = 0.72
+    ring_high_confidence_threshold: float = 0.84
+    ring_clear_threshold: float = 0.15
+    min_search_duration_s: float = 0.22
+    max_search_duration_s: float = 1.85
     confirm_window_s: float = 0.95
-    burst_threshold: float = 0.48
-    xp_threshold: float = 0.45
-    cooldown_s: float = 1.80
-    prompt_timeout_s: float = 2.00
+    burst_threshold: float = 0.42
+    xp_threshold: float = 0.40
+    cooldown_s: float = 1.60
+    prompt_timeout_s: float = 2.20
     min_monotonic_steps: int = 2
 
 
@@ -79,6 +79,25 @@ class FrameFeatures:
     ring_fill_ratio: float = 0.0
     loot_burst_score: float = 0.0
     xp_banner_score: float = 0.0
+    frame_mean_luma: float = 128.0
+
+
+@dataclass(slots=True)
+class VisualDiagnostics:
+    """Live telemetry snapshot for verifying that OpenCV sees Fortnite clearly."""
+
+    running: bool = False
+    fps: float = 0.0
+    frame_width: int = 0
+    frame_height: int = 0
+    frame_mean_luma: float = 0.0
+    black_frame_warning: bool = False
+    fsm_state: str = "idle"
+    last_prompt_score: float = 0.0
+    last_ring_fill: float = 0.0
+    last_burst_score: float = 0.0
+    last_xp_score: float = 0.0
+    detected_session_chests: int = 0
 
 
 class ChestOpeningFSM:
@@ -282,68 +301,92 @@ class VisualChestDetector:
     def extract_features_bgr(self, frame_bgr, timestamp_s: float) -> FrameFeatures:
         """Extract normalized chest-opening features from an OpenCV BGR frame.
 
-        Resolution-independent normalized ROIs (calibrated for 16:9 Fortnite HUD):
-        - Interact Prompt ROI: x in [0.43, 0.62], y in [0.54, 0.67]
-        - Radial Progress Ring ROI: centered at (0.50, 0.50), annulus radius [2.4%, 4.2%] of height
-        - Golden Loot Burst ROI: x in [0.36, 0.64], y in [0.34, 0.66]
-        - XP Accolade Banner ROI: x in [0.36, 0.64], y in [0.10, 0.24]
+        Resolution- and HUD-scale-independent pipeline calibrated for Fortnite:
+        - Detects black/occluded capture frames (e.g. Exclusive Fullscreen).
+        - Locates the radial interact progress ring both at crosshair center
+          `(0.50, 0.50)` AND floating world-space interact positions inside
+          `x in [0.34..0.66], y in [0.34..0.70]` across multiple radii
+          (`1.5%..4.6%` of height), requiring dark-inner / bright-arc annulus
+          contrast so bright sky/snow never causes false positives.
+        - Measures golden chest-lid burst and HUD XP accolade flashes.
         """
         import cv2
         import numpy as np
 
         h, w = frame_bgr.shape[:2]
         if h < 120 or w < 160:
-            return FrameFeatures(timestamp_s=timestamp_s)
+            return FrameFeatures(timestamp_s=timestamp_s, frame_mean_luma=0.0)
+
+        # Downscale 1440p/4K frames proportionally to ~1080p height for fast, consistent CV
+        if h > 1080:
+            scale = 1080.0 / float(h)
+            frame_bgr = cv2.resize(
+                frame_bgr,
+                (int(round(w * scale)), 1080),
+                interpolation=cv2.INTER_AREA,
+            )
+            h, w = frame_bgr.shape[:2]
 
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+        mean_luma_frame = float(np.mean(hsv[::8, ::8, 2]))
+        if mean_luma_frame < 2.0:
+            # Exclusive fullscreen black capture — do not feed garbage into FSM
+            return FrameFeatures(timestamp_s=timestamp_s, frame_mean_luma=mean_luma_frame)
 
-        # 1. Interact Prompt Badge Score (high-contrast bright text/keycap in interact ROI)
-        px1, px2 = int(w * 0.43), int(w * 0.62)
-        py1, py2 = int(h * 0.54), int(h * 0.67)
+        # 1. Interact Prompt Badge Score (wide central-lower zone covering HUD scale 50%..125%)
+        px1, px2 = int(w * 0.36), int(w * 0.66)
+        py1, py2 = int(h * 0.44), int(h * 0.70)
         prompt_hsv = hsv[py1:py2, px1:px2]
-        bright_white = (prompt_hsv[:, :, 1] < 55) & (prompt_hsv[:, :, 2] > 215)
-        dark_backing = prompt_hsv[:, :, 2] < 70
+        bright_white = (prompt_hsv[:, :, 1] < 65) & (prompt_hsv[:, :, 2] > 205)
+        dark_backing = prompt_hsv[:, :, 2] < 80
         white_ratio = float(np.mean(bright_white))
         dark_ratio = float(np.mean(dark_backing))
-        # Fortnite prompt pill has bright white key/text over dark translucent backdrop
         prompt_score = 0.0
-        if 0.015 <= white_ratio <= 0.35 and dark_ratio >= 0.15:
-            prompt_score = min(1.0, (white_ratio / 0.10) * 0.6 + min(dark_ratio / 0.35, 1.0) * 0.4)
+        if 0.006 <= white_ratio <= 0.32 and dark_ratio >= 0.08:
+            prompt_score = min(
+                1.0,
+                (white_ratio / 0.055) * 0.60 + min(dark_ratio / 0.25, 1.0) * 0.40,
+            )
 
-        # 2. Radial Search Progress Ring Coverage around screen center (72 angular bins)
-        cx, cy = w * 0.5, h * 0.5
-        r_inner = max(8.0, h * 0.025)
-        r_outer = max(14.0, h * 0.043)
-        bins = 72
-        filled_bins = 0
-        for b in range(bins):
-            angle = (2.0 * math.pi * b) / bins - (math.pi / 2.0)
-            cos_a = math.cos(angle)
-            sin_a = math.sin(angle)
-            bin_hit = False
-            for frac in (0.25, 0.5, 0.75):
-                r = r_inner + (r_outer - r_inner) * frac
-                sx = int(round(cx + cos_a * r))
-                sy = int(round(cy + sin_a * r))
-                if 0 <= sx < w and 0 <= sy < h:
-                    _hue, sat, val = hsv[sy, sx]
-                    # Bright white/gold progress arc stroke
-                    if val >= 225 and (sat <= 65 or (15 <= _hue <= 38 and sat >= 100)):
-                        bin_hit = True
-                        break
-            if bin_hit:
-                filled_bins += 1
-        ring_fill_ratio = filled_bins / float(bins)
+        # 2. Multi-scale Annulus-Contrast Radial Progress Ring Detection
+        # Candidate centers: crosshair center + any bright compact keycap/ring centroid in zone
+        candidate_centers: list[tuple[float, float]] = [(w * 0.50, h * 0.50)]
 
-        # 3. Golden Loot Burst Spike (warm gold hues H in [15..36], S >= 110, V >= 190)
-        bx1, bx2 = int(w * 0.36), int(w * 0.64)
-        by1, by2 = int(h * 0.34), int(h * 0.66)
+        gray_zone = hsv[py1:py2, px1:px2, 2]
+        bright_mask = ((hsv[py1:py2, px1:px2, 1] < 75) & (gray_zone >= 210)).astype(np.uint8) * 255
+        contours, _ = cv2.findContours(bright_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        zone_candidates: list[tuple[float, float, float]] = []
+        min_area = max(12.0, (h * 0.008) ** 2)
+        max_area = (h * 0.10) ** 2
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if min_area <= area <= max_area:
+                bx, by, bw, bh = cv2.boundingRect(cnt)
+                aspect = bw / float(max(1, bh))
+                if 0.55 <= aspect <= 1.85:
+                    cx_c = px1 + bx + bw * 0.5
+                    cy_c = py1 + by + bh * 0.5
+                    dist_center = math.hypot(cx_c - w * 0.5, cy_c - h * 0.52)
+                    zone_candidates.append((dist_center, cx_c, cy_c))
+        zone_candidates.sort(key=lambda item: item[0])
+        for _d, cx_c, cy_c in zone_candidates[:4]:
+            candidate_centers.append((cx_c, cy_c))
+
+        radii = [
+            max(10.0, h * frac)
+            for frac in (0.017, 0.023, 0.030, 0.038, 0.046)
+        ]
+        ring_fill_ratio = self._measure_best_annulus_ring(hsv, candidate_centers, radii)
+
+        # 3. Golden Loot Burst Spike (central chest-opening area)
+        bx1, bx2 = int(w * 0.30), int(w * 0.70)
+        by1, by2 = int(h * 0.30), int(h * 0.72)
         burst_hsv = hsv[by1:by2, bx1:bx2]
         gold_mask = (
-            (burst_hsv[:, :, 0] >= 15)
-            & (burst_hsv[:, :, 0] <= 36)
-            & (burst_hsv[:, :, 1] >= 110)
-            & (burst_hsv[:, :, 2] >= 190)
+            (burst_hsv[:, :, 0] >= 14)
+            & (burst_hsv[:, :, 0] <= 38)
+            & (burst_hsv[:, :, 1] >= 100)
+            & (burst_hsv[:, :, 2] >= 185)
         )
         gold_ratio = float(np.mean(gold_mask))
         mean_luma = float(np.mean(burst_hsv[:, :, 2])) / 255.0
@@ -351,34 +394,95 @@ class VisualChestDetector:
         if self._prev_burst_luma is not None:
             luma_delta = max(0.0, mean_luma - self._prev_burst_luma)
         self._prev_burst_luma = mean_luma
-        loot_burst_score = min(1.0, gold_ratio * 4.5 + luma_delta * 2.5)
+        loot_burst_score = min(1.0, gold_ratio * 4.8 + luma_delta * 2.8)
 
-        # 4. XP Accolade Toast Flash (amber/cyan bright banner in upper-center HUD)
-        xx1, xx2 = int(w * 0.36), int(w * 0.64)
-        xy1, xy2 = int(h * 0.10), int(h * 0.24)
-        xp_hsv = hsv[xy1:xy2, xx1:xx2]
-        xp_gold = (
-            (xp_hsv[:, :, 0] >= 16)
-            & (xp_hsv[:, :, 0] <= 35)
-            & (xp_hsv[:, :, 1] >= 120)
-            & (xp_hsv[:, :, 2] >= 200)
+        # 4. XP Accolade Toast Flash (check both upper-center AND lower-left XP bar/feed ROIs)
+        xp_rois = (
+            hsv[int(h * 0.08) : int(h * 0.25), int(w * 0.34) : int(w * 0.66)],
+            hsv[int(h * 0.72) : int(h * 0.90), int(w * 0.04) : int(w * 0.32)],
         )
-        xp_cyan = (
-            (xp_hsv[:, :, 0] >= 85)
-            & (xp_hsv[:, :, 0] <= 112)
-            & (xp_hsv[:, :, 1] >= 100)
-            & (xp_hsv[:, :, 2] >= 200)
-        )
-        xp_ratio = float(np.mean(xp_gold | xp_cyan))
-        xp_banner_score = min(1.0, xp_ratio * 6.0)
+        best_xp = 0.0
+        for xp_hsv in xp_rois:
+            if xp_hsv.size == 0:
+                continue
+            xp_gold = (
+                (xp_hsv[:, :, 0] >= 15)
+                & (xp_hsv[:, :, 0] <= 36)
+                & (xp_hsv[:, :, 1] >= 115)
+                & (xp_hsv[:, :, 2] >= 195)
+            )
+            xp_cyan = (
+                (xp_hsv[:, :, 0] >= 84)
+                & (xp_hsv[:, :, 0] <= 114)
+                & (xp_hsv[:, :, 1] >= 95)
+                & (xp_hsv[:, :, 2] >= 195)
+            )
+            best_xp = max(best_xp, min(1.0, float(np.mean(xp_gold | xp_cyan)) * 6.5))
 
         return FrameFeatures(
             timestamp_s=timestamp_s,
             prompt_score=prompt_score,
             ring_fill_ratio=ring_fill_ratio,
             loot_burst_score=loot_burst_score,
-            xp_banner_score=xp_banner_score,
+            xp_banner_score=best_xp,
+            frame_mean_luma=mean_luma_frame,
         )
+
+    @staticmethod
+    def _measure_best_annulus_ring(
+        hsv,
+        centers: list[tuple[float, float]],
+        radii: list[float],
+    ) -> float:
+        """Measure radial arc coverage requiring contrast between the bright ring stroke
+        and its darker inner/outer track (eliminates bright sky / white wall false hits)."""
+        import numpy as np
+
+        h, w = hsv.shape[:2]
+        bins = 48
+        angles = np.linspace(-math.pi / 2.0, 1.5 * math.pi, bins, endpoint=False)
+        cos_a = np.cos(angles)
+        sin_a = np.sin(angles)
+
+        best_fill = 0.0
+        for cx, cy in centers:
+            for radius in radii:
+                if (
+                    cx - radius - 5 < 0
+                    or cx + radius + 5 >= w
+                    or cy - radius - 5 < 0
+                    or cy + radius + 5 >= h
+                ):
+                    continue
+
+                rx = np.rint(cx + cos_a * radius).astype(np.int32)
+                ry = np.rint(cy + sin_a * radius).astype(np.int32)
+                r_sat = hsv[ry, rx, 1].astype(np.int32)
+                r_val = hsv[ry, rx, 2].astype(np.int32)
+                r_hue = hsv[ry, rx, 0].astype(np.int32)
+
+                # Inner and outer comparison rings to verify stroke contrast (rejects flat bright sky)
+                r_in = max(3.0, radius * 0.68)
+                r_out = radius * 1.32
+                ix = np.clip(np.rint(cx + cos_a * r_in).astype(np.int32), 0, w - 1)
+                iy = np.clip(np.rint(cy + sin_a * r_in).astype(np.int32), 0, h - 1)
+                ox = np.clip(np.rint(cx + cos_a * r_out).astype(np.int32), 0, w - 1)
+                oy = np.clip(np.rint(cy + sin_a * r_out).astype(np.int32), 0, h - 1)
+
+                in_val = hsv[iy, ix, 2].astype(np.int32)
+                out_val = hsv[oy, ox, 2].astype(np.int32)
+                bg_val = np.minimum(in_val, out_val)
+
+                bright_stroke = (r_val >= 205) & (
+                    (r_sat <= 75) | ((r_hue >= 14) & (r_hue <= 40) & (r_sat >= 90))
+                )
+                has_contrast = (r_val - bg_val) >= 35
+                hits = bright_stroke & has_contrast
+
+                fill = float(np.mean(hits))
+                if fill > best_fill:
+                    best_fill = fill
+        return best_fill
 
     def process_frame_bgr(self, frame_bgr, timestamp_s: float) -> Optional[ChestEventRecord]:
         features = self.extract_features_bgr(frame_bgr, timestamp_s)
@@ -468,27 +572,52 @@ class LiveVisualMonitor:
     """Background thread capturing desktop frames via `mss` and running `VisualChestDetector`.
 
     Zero game hooks, zero memory reads — captures standard OS desktop frames only.
+    Automatically detects black capture frames (caused by Exclusive Fullscreen) and
+    exposes real-time `VisualDiagnostics`.
     """
 
     def __init__(
         self,
         on_chest_opened: Callable[[ChestEventRecord], None],
         on_error: Optional[Callable[[str], None]] = None,
-        fps: float = 10.0,
+        on_diagnostics: Optional[Callable[[VisualDiagnostics], None]] = None,
+        fps: float = 15.0,
         monitor_index: int = 1,
         config: Optional[VisualDetectorConfig] = None,
     ) -> None:
         self._on_chest_opened = on_chest_opened
         self._on_error = on_error
-        self._fps = max(2.0, min(30.0, float(fps)))
+        self._on_diagnostics = on_diagnostics
+        self._fps = max(4.0, min(30.0, float(fps)))
         self._monitor_index = max(1, int(monitor_index))
         self._detector = VisualChestDetector(config=config)
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._diag_lock = threading.Lock()
+        self._diagnostics = VisualDiagnostics()
 
     @property
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def diagnostics(self) -> VisualDiagnostics:
+        with self._diag_lock:
+            d = self._diagnostics
+            return VisualDiagnostics(
+                running=self.is_running,
+                fps=d.fps,
+                frame_width=d.frame_width,
+                frame_height=d.frame_height,
+                frame_mean_luma=d.frame_mean_luma,
+                black_frame_warning=d.black_frame_warning,
+                fsm_state=d.fsm_state,
+                last_prompt_score=d.last_prompt_score,
+                last_ring_fill=d.last_ring_fill,
+                last_burst_score=d.last_burst_score,
+                last_xp_score=d.last_xp_score,
+                detected_session_chests=d.detected_session_chests,
+            )
 
     def start(self) -> bool:
         if self.is_running:
@@ -519,6 +648,8 @@ class LiveVisualMonitor:
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=2.0)
         self._thread = None
+        with self._diag_lock:
+            self._diagnostics.running = False
 
     def _run_loop(self) -> None:
         import cv2
@@ -527,6 +658,12 @@ class LiveVisualMonitor:
 
         interval = 1.0 / self._fps
         t0 = time.monotonic()
+        frames_in_window = 0
+        fps_window_start = t0
+        measured_fps = 0.0
+        black_streak = 0
+        last_diag_emit = 0.0
+
         try:
             with mss.mss() as sct:
                 mon_idx = min(self._monitor_index, len(sct.monitors) - 1)
@@ -535,9 +672,51 @@ class LiveVisualMonitor:
                     tick_start = time.monotonic()
                     raw_img = np.asarray(sct.grab(monitor))
                     frame_bgr = cv2.cvtColor(raw_img, cv2.COLOR_BGRA2BGR)
-                    event = self._detector.process_frame_bgr(frame_bgr, tick_start - t0)
+                    features = self._detector.extract_features_bgr(frame_bgr, tick_start - t0)
+
+                    if features.frame_mean_luma < 2.0:
+                        black_streak += 1
+                        event = None
+                    else:
+                        black_streak = 0
+                        event = self._detector.fsm.update(features)
+
+                    frames_in_window += 1
+                    dt_fps = tick_start - fps_window_start
+                    if dt_fps >= 1.0:
+                        measured_fps = frames_in_window / dt_fps
+                        frames_in_window = 0
+                        fps_window_start = tick_start
+
+                    black_warn = black_streak >= int(self._fps * 1.5)
+                    h, w = frame_bgr.shape[:2]
+                    snap = VisualDiagnostics(
+                        running=True,
+                        fps=round(measured_fps, 1),
+                        frame_width=w,
+                        frame_height=h,
+                        frame_mean_luma=round(features.frame_mean_luma, 1),
+                        black_frame_warning=black_warn,
+                        fsm_state=self._detector.fsm.state.value,
+                        last_prompt_score=round(features.prompt_score, 3),
+                        last_ring_fill=round(features.ring_fill_ratio, 3),
+                        last_burst_score=round(features.loot_burst_score, 3),
+                        last_xp_score=round(features.xp_banner_score, 3),
+                        detected_session_chests=self._detector.fsm.opened_count,
+                    )
+                    with self._diag_lock:
+                        self._diagnostics = snap
+
+                    if self._on_diagnostics and (tick_start - last_diag_emit) >= 1.0:
+                        last_diag_emit = tick_start
+                        try:
+                            self._on_diagnostics(snap)
+                        except Exception:
+                            pass
+
                     if event is not None:
                         self._on_chest_opened(event)
+
                     sleep_for = interval - (time.monotonic() - tick_start)
                     if sleep_for > 0:
                         self._stop_event.wait(sleep_for)

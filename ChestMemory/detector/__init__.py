@@ -20,6 +20,7 @@ from .visual_detector import (
     LiveVisualMonitor,
     VisualChestDetector,
     VisualDetectorConfig,
+    VisualDiagnostics,
     VisualState,
 )
 
@@ -40,6 +41,7 @@ __all__ = [
     "UnrealBitReader",
     "VisualChestDetector",
     "VisualDetectorConfig",
+    "VisualDiagnostics",
     "VisualState",
     "compute_file_sha256",
     "is_replay_live",

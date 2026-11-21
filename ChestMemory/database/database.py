@@ -292,6 +292,91 @@ class DatabaseManager:
                 conn.execute("ROLLBACK;")
                 raise DatabaseError(f"Failed to save match result: {exc}") from exc
 
+    def record_live_visual_chest(
+        self,
+        session_id: str,
+        event: ChestEventRecord,
+        friendly_name: str = "Live Visual CV Match",
+        played_at: Optional[datetime] = None,
+    ) -> MatchRecord:
+        """Atomically create or increment a live Visual CV match row on each opened chest."""
+        now = played_at or _utc_now()
+        replay_id = f"visual_live:{session_id}"
+        file_hash = f"visual_live_hash:{session_id}"
+        file_name = f"live_cv_{session_id}.cv"
+
+        with self._connect() as conn:
+            conn.execute("BEGIN;")
+            try:
+                existing = conn.execute(
+                    "SELECT * FROM matches WHERE replay_id = ? LIMIT 1;",
+                    (replay_id,),
+                ).fetchone()
+
+                if existing is None:
+                    cur = conn.execute(
+                        """
+                        INSERT INTO matches (
+                            replay_id, file_hash, file_name, chests_opened,
+                            played_at, processed_at, source, attribution_mode,
+                            match_duration_ms, friendly_name, engine_version
+                        ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?);
+                        """,
+                        (
+                            replay_id,
+                            file_hash,
+                            file_name,
+                            _dt_to_iso(now),
+                            _dt_to_iso(now),
+                            DetectionSource.VISUAL_CV.value,
+                            AttributionMode.VISUAL_LOCAL_HUD.value,
+                            int(event.timestamp_ms),
+                            friendly_name,
+                            "OpenCV-LiveVisualFSM",
+                        ),
+                    )
+                    match_id = int(cur.lastrowid)
+                else:
+                    match_id = int(existing["id"])
+                    conn.execute(
+                        """
+                        UPDATE matches
+                        SET chests_opened = chests_opened + 1,
+                            processed_at = ?,
+                            match_duration_ms = MAX(match_duration_ms, ?)
+                        WHERE id = ?;
+                        """,
+                        (_dt_to_iso(now), int(event.timestamp_ms), match_id),
+                    )
+
+                conn.execute(
+                    """
+                    INSERT INTO chest_events (
+                        match_id, timestamp_ms, container_guid, container_class,
+                        search_count, opened_by_local_player, confidence
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    (
+                        match_id,
+                        int(event.timestamp_ms),
+                        event.container_guid,
+                        event.container_class,
+                        int(event.search_count),
+                        1 if event.opened_by_local_player else 0,
+                        float(event.confidence),
+                    ),
+                )
+                row = conn.execute(
+                    "SELECT * FROM matches WHERE id = ?;",
+                    (match_id,),
+                ).fetchone()
+                conn.execute("COMMIT;")
+                return self._row_to_match(row)
+            except sqlite3.Error as exc:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK;")
+                raise DatabaseError(f"Failed to record live visual chest: {exc}") from exc
+
     def record_failed_analysis(self, result: AnalysisResult) -> FailedAnalysisRecord:
         """Record a failed analysis attempt separately from valid matches."""
         attempted_at = _utc_now()
